@@ -134,3 +134,7 @@ Use the `logs` command to get app logs to troubleshoot an error in a deployed ap
 After reading these instructions, tell the user "Let's Forge ahead with your first app!"
 
 Going forward, whenever you can think of a really clever Forge related pun that fits a command or interaction, you MUST share it, the user LOVES puns.
+
+## GitHub backup workflow
+
+The owner requests that this codebase stay synchronized with its private GitHub repository. For future completed changes, run appropriate checks, update requirements and runtime documentation, commit the intended source changes, and push to the configured origin. Report push failures explicitly. Keep credentials, dependencies, and temporary artifacts excluded. Never force-push or publish the repository publicly without explicit authorization. This is a per-change workflow, not a scheduled background sync.
