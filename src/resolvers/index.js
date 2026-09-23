@@ -147,6 +147,7 @@ function validatePolicy(input) {
     })).filter(filter => filter.fieldId) : [],
     resultValue: text(input?.resultValue, 500),
     protect: input?.protect === true,
+    revision: crypto.randomUUID(),
     status: 'draft',
     updatedAt: new Date().toISOString()
   };
@@ -196,9 +197,7 @@ resolver.define('savePolicy', async ({ payload }) => {
     ...policy,
     lastRunAt: existing.lastRunAt,
     lastRunOutcome: existing.lastRunOutcome,
-    lastRunTraceId: existing.lastRunTraceId,
-    lastValidatedKey: existing.lastValidatedKey,
-    lastValidatedValue: existing.lastValidatedValue
+    lastRunTraceId: existing.lastRunTraceId
   } : policy;
   const next = [...current.filter(item => item.id !== policy.id), storedPolicy]
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
@@ -224,6 +223,11 @@ resolver.define('recordPolicyRun', async ({ payload }) => {
   const policies = await readPolicies();
   const policy = policies.find(item => item.id === policyId);
   if (!policy || !traceId) throw new Error('Save the policy before retaining its validation trace.');
+  if (!policy.revision || payload?.policyRevision !== policy.revision) throw new Error('Save and validate the current revision.');
+  const configuration = validatePolicy(payload.configuration);
+  const keys = Object.keys(configuration).filter(key => !['revision', 'updatedAt', 'status'].includes(key));
+  if (keys.some(key => JSON.stringify(configuration[key]) !== JSON.stringify(policy[key]))) throw new Error('Save the edited configuration before validation.');
+
 
   const run = {
     traceId,
@@ -234,7 +238,8 @@ resolver.define('recordPolicyRun', async ({ payload }) => {
     durationMs: Math.max(0, Math.min(300000, Number(payload?.durationMs) || 0)),
     jiraRequests: Math.max(0, Math.min(1000, Number(payload?.jiraRequests) || 0)),
     createdAt: new Date().toISOString(),
-    kind: 'validation'
+    kind: 'validation',
+    policyRevision: policy.revision
   };
 
   const currentRuns = await kvs.get(RUNS_KEY);
@@ -244,8 +249,9 @@ resolver.define('recordPolicyRun', async ({ payload }) => {
     lastRunAt: run.createdAt,
     lastRunOutcome: run.outcome,
     lastRunTraceId: run.traceId,
-    lastValidatedKey: run.outcome === 'error' ? item.lastValidatedKey : run.workItemKey,
-    lastValidatedValue: run.outcome === 'error' ? item.lastValidatedValue : jsonValue(payload?.configuredTargetValue)
+    lastValidatedRevision: run.outcome === 'error' ? null : policy.revision,
+    lastValidatedKey: run.outcome === 'error' ? null : run.workItemKey,
+    lastValidatedValue: run.outcome === 'error' ? null : jsonValue(payload?.configuredTargetValue)
   } : item);
 
   await kvs.set(RUNS_KEY, nextRuns);
@@ -269,13 +275,10 @@ async function writeProjectIndex(projectId, policies) {
   }), `Updating the runtime index for project ${projectId}`);
 }
 
-resolver.define('activatePolicy', async ({ payload }) => {
-  const policyId = text(payload?.id, 80);
-  const policies = await readPolicies();
-  const policy = policies.find(item => item.id === policyId);
+async function prepareActivation(policy, policies) {
   if (!policy) throw new Error('The policy no longer exists.');
   if (policy.behaviorType !== 'assessment') throw new Error('The first runtime release activates field-assessment policies only.');
-  if (!policy.lastValidatedKey || policy.lastRunOutcome === 'error') throw new Error('Run a successful validation on a representative work item before activation.');
+  if (!policy.revision || policy.lastValidatedRevision !== policy.revision || !policy.lastValidatedKey) throw new Error('Run a successful validation on a representative work item before activation.');
   const conflict = policies.find(item => item.id !== policy.id && item.status === 'active' && item.targetFieldId === policy.targetFieldId && item.projectIds.some(id => policy.projectIds.includes(id)));
   if (conflict) throw new Error(`“${conflict.name}” already owns this target field in an overlapping space.`);
 
@@ -294,8 +297,30 @@ resolver.define('activatePolicy', async ({ payload }) => {
   const directDependency = policy.conditions.some(condition => condition.fieldId === policy.targetFieldId);
   if (directDependency) throw new Error('This policy reads and writes the same field, which would create a direct cycle. Choose a different condition or target field.');
   validateDependencyGraph(next, policy.projectIds);
+  return { activePolicy, next };
+}
+
+resolver.define('reviewPolicyActivation', async ({ payload }) => {
+  const policies = await readPolicies();
+  const policy = policies.find(item => item.id === payload.id);
+  const { activePolicy } = await prepareActivation(policy, policies);
+  const review = { policyId: policy.id, policyRevision: policy.revision, reviewToken: crypto.randomUUID(), expiresAt: Date.now() + 15 * 60 * 1000 };
+  await kvs.set(`activation-review:v1:${policy.id}`, review);
+  return { ...review, dependencyFieldIds: activePolicy.runtime.dependencyFieldIds, projectIds: policy.projectIds, targetFieldId: policy.targetFieldId, protectionEnabled: policy.protect, createdIssuesIncluded: true, chainLimit: MAX_CHAIN_DEPTH,
+    upstreamPolicies: policies.filter(item => item.status === 'active' && item.id !== policy.id && item.projectIds.some(id => policy.projectIds.includes(id)) && activePolicy.runtime.dependencyFieldIds.includes(item.targetFieldId)).map(item => item.name),
+    downstreamPolicies: policies.filter(item => item.status === 'active' && item.id !== policy.id && item.projectIds.some(id => policy.projectIds.includes(id)) && item.runtime?.dependencyFieldIds.includes(policy.targetFieldId)).map(item => item.name),
+    updateJiraRequests: { noMatch: 1, matchNoChange: 2, changed: 3 } };
+});
+
+resolver.define('activatePolicy', async ({ payload }) => {
+  const policies = await readPolicies();
+  const policy = policies.find(item => item.id === payload.id);
+  const review = await kvs.get(`activation-review:v1:${payload.id}`);
+  if (!policy || !review || review.reviewToken !== payload.reviewToken || review.policyRevision !== policy.revision || payload.policyRevision !== policy.revision || !Number.isFinite(review.expiresAt) || review.expiresAt <= Date.now()) throw new Error('Review the current revision again; activation review is missing or expired.');
+  const { activePolicy, next } = await prepareActivation(policy, policies);
   for (const projectId of policy.projectIds) await writeProjectIndex(projectId, next);
   await kvs.set(POLICIES_KEY, next);
+  await kvs.delete(`activation-review:v1:${policy.id}`);
   return activePolicy;
 });
 

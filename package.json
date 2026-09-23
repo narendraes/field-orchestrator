@@ -5,7 +5,8 @@
   "license": "MIT",
   "private": true,
   "scripts": {
-    "lint": "eslint src/**/*"
+    "lint": "eslint src/**/*",
+    "test": "node --experimental-vm-modules --test test/*.test.cjs"
   },
   "devDependencies": {
     "eslint": "^8.56.0",

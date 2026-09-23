@@ -102,6 +102,8 @@ const blankPolicy = () => ({
   resultValue: '', protect: false, status: 'draft'
 });
 
+const hasCurrentValidation = policy => Boolean(policy.revision && policy.lastValidatedRevision === policy.revision && policy.lastValidatedKey);
+
 function App() {
   const [page, setPage] = useState('Policies');
   const [fields, setFields] = useState([]);
@@ -110,6 +112,7 @@ function App() {
   const [issueTypes, setIssueTypes] = useState([]);
   const [policies, setPolicies] = useState([]);
   const [runs, setRuns] = useState([]);
+  const [activationReview, setActivationReview] = useState(null);
   const [draft, setDraft] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -130,7 +133,11 @@ function App() {
   const fieldName = id => id === 'statusCategory' ? 'Status category' : field(id)?.name || id || '[field]';
   const projectName = id => projects.find(item => item.value === id)?.name || id;
   const selectValue = (items, value) => items.find(item => item.value === value) || null;
-  const change = patch => setDraft(current => ({ ...current, ...patch }));
+  const change = patch => {
+    if (saving || previewing || draft?.status === 'active') return;
+    setActivationReview(null); setPreview(null);
+    setDraft(current => ({ ...current, ...patch, lastValidatedRevision: null }));
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -264,7 +271,7 @@ function App() {
     try {
       const saved = await invoke('savePolicy', draft);
       setPolicies(current => [saved, ...current.filter(item => item.id !== saved.id)]);
-      setDraft(null); setNotice('Draft saved in Forge storage. It is inactive and cannot change Jira work items.');
+      setDraft(saved); setPreview(null); setActivationReview(null); setNotice('Draft saved. Test and validate here before activation.');
     } catch (exception) {
       setError(exception.message || 'The draft could not be saved.');
     } finally { setSaving(false); }
@@ -286,7 +293,9 @@ function App() {
   async function setActivation(policy, active) {
     setSaving(true); setError(''); setNotice('');
     try {
-      const updated = await invoke(active ? 'activatePolicy' : 'deactivatePolicy', { id: policy.id });
+      const updated = await invoke(active ? 'activatePolicy' : 'deactivatePolicy', active ? { id: policy.id, policyRevision: activationReview?.policyRevision, reviewToken: activationReview?.reviewToken } : { id: policy.id });
+      setDraft(current => current?.id === updated.id ? updated : current);
+      setActivationReview(null);
       setPolicies(current => current.map(item => item.id === updated.id ? updated : item));
       setNotice(active
         ? `“${updated.name}” is active. Qualifying Jira updates will now enforce it in the selected spaces.`
@@ -411,39 +420,66 @@ function App() {
   }
 
   async function runPreview() {
+    if (!testKey.trim()) { setError('Enter a work-item key before testing.'); return; }
+    const problem = validate();
+    if (problem) { setError(problem); return; }
+    if (draft.status === 'active') return;
+    setSaving(true); setError(''); setNotice(''); setActivationReview(null);
+    try {
+      // Pass the saved snapshot directly; React state still holds the old revision.
+      const saved = await invoke('savePolicy', draft);
+      setDraft(saved);
+      setPolicies(current => [saved, ...current.filter(item => item.id !== saved.id)]);
+      await evaluatePreview(saved);
+    } catch (exception) { setError(exception.message || 'Could not save and test.'); }
+    finally { setSaving(false); }
+  }
+
+  async function evaluatePreview(draft) {
     const key = testKey.trim().toUpperCase();
     if (!key) { setPreview({ error: 'Enter a Jira or JPD work-item key.' }); return; }
     const configurationError = validate();
     if (configurationError) { setPreview({ error: `Complete the policy first: ${configurationError}` }); return; }
     const metrics = { startedAt: Date.now(), jiraRequests: 0 };
     const traceId = `fo-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    const showPreview = result => {
+    const showPreview = async result => {
       const validationMetrics = {
         durationMs: Date.now() - metrics.startedAt,
         jiraRequests: metrics.jiraRequests
       };
       setPreview({ ...result, metrics: validationMetrics, traceId, traceRetained: draft.id ? null : false });
       if (draft.id) {
-        // Display the calculated result immediately. Trace persistence is
-        // diagnostic work and must not extend the validation's critical path.
-        invoke('recordPolicyRun', {
+        // Display the calculated result immediately. Trace persistence completes before activation readiness is granted;
+        // the calculated preview can be displayed while that request finishes.
+        await invoke('recordPolicyRun', {
             policyId: draft.id,
+            policyRevision: draft.revision,
+            configuration: draft,
             traceId,
             workItemKey: result.sourceKey || key,
             outcome: result.error ? 'error' : result.wouldChange ? 'would-change' : 'no-change',
             configuredTargetValue: result.configuredTargetValue,
             ...validationMetrics
-          }).then(run => {
+          }).then(async run => {
           setRuns(current => [run, ...current.filter(item => item.traceId !== run.traceId)].slice(0, 50));
-          setPolicies(current => current.map(item => item.id === draft.id ? {
+          setPolicies(current => current.map(item => item.id === draft.id && item.revision === run.policyRevision ? {
             ...item,
             lastRunAt: run.createdAt,
             lastRunOutcome: run.outcome,
             lastRunTraceId: run.traceId,
-            lastValidatedKey: run.outcome === 'error' ? item.lastValidatedKey : (result.sourceKey || key),
-            lastValidatedValue: run.outcome === 'error' ? item.lastValidatedValue : result.configuredTargetValue
+            lastValidatedRevision: run.outcome === 'error' ? null : run.policyRevision,
+            lastValidatedKey: run.outcome === 'error' ? null : (result.sourceKey || key),
+            lastValidatedValue: run.outcome === 'error' ? null : result.configuredTargetValue
           } : item));
           setPreview(current => current?.traceId === traceId ? { ...current, traceRetained: true } : current);
+          const validated = { ...draft, lastValidatedRevision: result.error ? null : run.policyRevision, lastValidatedKey: result.error ? null : key };
+          setDraft(current => current?.revision === run.policyRevision ? validated : current);
+          if (!result.error && draft.behaviorType === 'assessment') {
+            try {
+              const review = await invoke('reviewPolicyActivation', { id: draft.id });
+              setActivationReview(review);
+            } catch (exception) { setError(exception.message || 'Activation readiness check failed.'); }
+          }
         }).catch(() => {
           // A validation result remains useful even if its optional trace
           // cannot be retained. Surface this state beside the trace ID.
@@ -456,7 +492,7 @@ function App() {
       const fieldIds = previewFields(draft);
       const source = await jiraJson(`/rest/api/3/issue/${encodeURIComponent(key)}?fields=${encodeURIComponent(fieldIds.join(','))}`, metrics);
       if (!draft.projectIds.includes(String(source.fields?.project?.id))) {
-        showPreview({ error: `${source.key} is outside this policy's selected Jira/JPD spaces.` });
+        await showPreview({ error: `${source.key} is outside this policy's selected Jira/JPD spaces.` });
         return;
       }
 
@@ -470,20 +506,20 @@ function App() {
         const matched = draft.conditionMatch === 'OR' ? checks.some(item => item.matched) : checks.every(item => item.matched);
         const currentValue = issueFieldValue(source, draft.targetFieldId);
         const computedValue = matched ? configuredTargetValue : currentValue;
-        showPreview({ type: 'assessment', sourceKey: source.key, affectedKey: source.key, checks, matched, currentValue, computedValue, configuredTargetValue, wouldChange: matched && comparableValue(currentValue) !== comparableValue(computedValue) });
+        await showPreview({ type: 'assessment', sourceKey: source.key, affectedKey: source.key, checks, matched, currentValue, computedValue, configuredTargetValue, wouldChange: matched && comparableValue(currentValue) !== comparableValue(computedValue) });
         return;
       }
 
       if (draft.behaviorType === 'hierarchy') {
         const parentKey = source.fields?.parent?.key;
-        if (!parentKey) { showPreview({ error: `${source.key} has no direct parent to update.` }); return; }
+        if (!parentKey) { await showPreview({ error: `${source.key} has no direct parent to update.` }); return; }
         const parent = await jiraJson(`/rest/api/3/issue/${encodeURIComponent(parentKey)}?fields=${encodeURIComponent(fieldIds.join(','))}`, metrics);
         const sourceValue = issueFieldValue(source, draft.sourceFieldId);
         const currentValue = issueFieldValue(parent, draft.targetFieldId);
         const computedValue = draft.aggregation === 'union'
           ? [...new Map([...(Array.isArray(currentValue) ? currentValue : currentValue ? [currentValue] : []), ...(Array.isArray(sourceValue) ? sourceValue : sourceValue ? [sourceValue] : [])].map(value => [displayValue(value), value])).values()]
           : sourceValue;
-        showPreview({ type: 'hierarchy', sourceKey: source.key, affectedKey: parent.key, currentValue, computedValue, wouldChange: comparableValue(currentValue) !== comparableValue(computedValue) });
+        await showPreview({ type: 'hierarchy', sourceKey: source.key, affectedKey: parent.key, currentValue, computedValue, wouldChange: comparableValue(currentValue) !== comparableValue(computedValue) });
         return;
       }
 
@@ -513,13 +549,14 @@ function App() {
       const currentValue = issueFieldValue(source, draft.targetFieldId);
       const computedValue = aggregateCandidates(draft, candidates);
       const contributingCount = candidates.filter(item => item.rawValue !== null && item.rawValue !== undefined && item.rawValue !== '').length;
-      showPreview({ type: 'relationship', aggregation: draft.aggregation, sourceKey: source.key, affectedKey: source.key, linkedCount: linkedKeys.length, rootCount: roots.length, traversedCount: discoveredKeys.length, candidates, contributingCount, currentValue, computedValue, wouldChange: comparableValue(currentValue) !== comparableValue(computedValue) });
+      await showPreview({ type: 'relationship', aggregation: draft.aggregation, sourceKey: source.key, affectedKey: source.key, linkedCount: linkedKeys.length, rootCount: roots.length, traversedCount: discoveredKeys.length, candidates, contributingCount, currentValue, computedValue, wouldChange: comparableValue(currentValue) !== comparableValue(computedValue) });
     } catch (exception) {
-      showPreview({ error: exception.message || 'The policy test could not be completed.' });
+      await showPreview({ error: exception.message || 'The policy test could not be completed.' });
     } finally { setPreviewing(false); }
   }
 
   function start(policy) {
+    setActivationReview(null);
     setDraft(policy ? { ...policy, conditions: policy.conditions.map(item => ({ ...item })), filters: (policy.filters || []).map(item => ({ ...item })) } : blankPolicy());
     setError(''); setNotice(''); setTestKey(''); setPreview(null);
     setTargetOptions([]);
@@ -548,10 +585,10 @@ function App() {
     {loading && <Text>Loading Jira and JPD configuration…</Text>}
     {!loading && error && !draft && <SectionMessage title="Could not load configuration" appearance="error"><Text>{error}</Text><Button onClick={() => setAttempt(value => value + 1)}>Retry</Button></SectionMessage>}
     {!loading && !error && <Inline alignBlock="center" spread="space-between"><Text>{customCount} custom fields, {projects.length} spaces, and {linkTypes.length} relationship types are available.</Text><Button onClick={() => setAttempt(value => value + 1)}>Refresh Jira metadata</Button></Inline>}
-    <ButtonGroup>{['Policies', 'Executions', 'Settings'].map(name => <Button key={name} appearance={page === name ? 'primary' : 'default'} onClick={() => { setPage(name); setDraft(null); setDeleteCandidate(null); setError(''); }}>{name}</Button>)}</ButtonGroup>
+    <ButtonGroup>{['Policies', 'Executions', 'Settings'].map(name => <Button key={name} isDisabled={saving || previewing} appearance={page === name ? 'primary' : 'default'} onClick={() => { setPage(name); setActivationReview(null); setDraft(null); setDeleteCandidate(null); setError(''); }}>{name}</Button>)}</ButtonGroup>
 
     {draft ? <Stack space="space.200">
-      <Inline alignBlock="center" spread="space-between"><Heading as="h2">{draft.id ? 'Edit field policy' : 'New field policy'}</Heading><Lozenge appearance="new" isBold>Draft</Lozenge></Inline>
+      <Inline alignBlock="center" spread="space-between"><Heading as="h2">{draft.id ? 'Edit field policy' : 'New field policy'}</Heading><Lozenge appearance={draft.status === 'active' ? 'success' : 'new'} isBold>{draft.status === 'active' ? 'Active' : hasCurrentValidation(draft) ? 'Validated' : 'Draft'}</Lozenge></Inline>
       <Box xcss={cardStyles}>
         <Stack space="space.150">
           <Inline alignBlock="center" space="space.100"><Lozenge appearance="moved">Step 1</Lozenge><Heading as="h3">Target and scope</Heading></Inline>
@@ -639,10 +676,10 @@ function App() {
           <HelperMessage>For active assessment policies, an external target edit is restored when the configured conditions still match. If they do not match, the app leaves the value unchanged.</HelperMessage>
           <SectionMessage title="Policy summary" appearance="information"><Text>{summary(draft)}</Text><Text>Scope: {draft.projectIds.map(projectName).join(', ') || 'choose at least one space'}.</Text></SectionMessage>
           <Inline alignBlock="center" space="space.100"><Heading as="h3">Test policy</Heading><Lozenge appearance="inprogress">Read only</Lozenge></Inline>
-          <Text>Enter a representative Jira or JPD key to calculate the outcome using live data. Testing never updates the work item.</Text>
+          <Text>Enter a representative Jira or JPD key to calculate the outcome using live data. Testing saves your draft first and does not update Jira work items.</Text>
           <Inline grow="fill" shouldWrap space="space.150" rowSpace="space.100" alignBlock="end">
             <Box xcss={columnStyles}><Label labelFor="test-key">Work-item key</Label><Textfield id="test-key" placeholder="For example, ABC-123" value={testKey} onChange={event => { setTestKey(event.target.value); setTargetOptions([]); setPreview(null); }} /><HelperMessage>The work item must be in one of the selected spaces and visible to you.</HelperMessage></Box>
-            <Button appearance="primary" isDisabled={previewing} onClick={runPreview}>{previewing ? 'Validating…' : 'Run validation'}</Button>
+            <Button appearance="primary" isDisabled={previewing || saving || draft.status === 'active'} onClick={runPreview}>{previewing || saving ? 'Validating…' : 'Save & validate'}</Button>
           </Inline>
           {preview?.error && <SectionMessage title="Validation could not run" appearance="error"><Text>{preview.error}</Text></SectionMessage>}
           {preview && !preview.error && <Stack space="space.150">
@@ -664,8 +701,15 @@ function App() {
           {preview?.metrics && <SectionMessage title="Validation usage" appearance="information"><Text>Response time: {(preview.metrics.durationMs / 1000).toFixed(2)} seconds. Jira REST requests: {preview.metrics.jiraRequests}. Trace ID: {preview.traceId}.</Text><Text>{preview.traceRetained === true ? 'This trace is retained in Executions and emitted to Forge logs.' : preview.traceRetained === null ? 'The result is complete; its trace is being retained in the background.' : preview.traceFailed ? 'The result is complete, but its trace could not be retained.' : 'Save the policy before testing to retain its trace in Executions and Forge logs.'}</Text><Text>Estimated Forge charge: $0.00 while this app remains within its monthly free allowances. A retained test uses one resolver invocation, two KVS reads, two KVS writes, and one small log record; it does not invoke the policy event runtime or write Jira data.</Text></SectionMessage>}
         </Stack>
       </Box>
+      {draft.status === 'active' && <SectionMessage title="Active policy" appearance="success"><Text>Deactivate this policy before changing its configuration.</Text></SectionMessage>}
+      {activationReview && <SectionMessage title="Ready to activate" appearance="success"><Text>Dependencies: {activationReview.dependencyFieldIds.map(fieldName).join(', ')}. New work items are included. Estimated Jira requests per policy evaluation: 1–3.</Text><Text>Upstream policies: {activationReview.upstreamPolicies.join(', ') || 'None'}. Downstream policies: {activationReview.downstreamPolicies.join(', ') || 'None'}. Review expires after 15 minutes.</Text></SectionMessage>}
       {error && <SectionMessage title="Check the policy" appearance="error"><Text>{error}</Text></SectionMessage>}
-      <ButtonGroup><Button appearance="primary" isDisabled={saving} onClick={save}>{saving ? 'Saving…' : 'Save draft'}</Button><Button onClick={() => { setDraft(null); setError(''); }}>Cancel</Button></ButtonGroup>
+      <ButtonGroup>
+        <Button isDisabled={saving || previewing || draft.status === 'active'} onClick={save}>Save draft</Button>
+        <Button appearance="primary" isDisabled={saving || previewing || draft.status === 'active'} onClick={runPreview}>Save & validate</Button>
+        {draft.status === 'active' ? <Button isDisabled={saving || previewing} onClick={() => setActivation(draft, false)}>Deactivate</Button> : <Button appearance="primary" isDisabled={saving || previewing || !activationReview || !hasCurrentValidation(draft)} onClick={() => setActivation(draft, true)}>Activate</Button>}
+        <Button isDisabled={saving || previewing} onClick={() => { setDraft(null); setError(''); setActivationReview(null); }}>Back to policies</Button>
+      </ButtonGroup>
     </Stack> : page === 'Policies' ? <Stack space="space.200">
       <Heading as="h2">Field policies</Heading>
       <Text>Create and manage every field rule from one place. Each row shows its target, scope, protection, and lifecycle status.</Text>
@@ -678,9 +722,10 @@ function App() {
       <Textfield aria-label="Search policies" placeholder="Search by policy or target field" value={search} onChange={event => setSearch(event.target.value)} />
       <DynamicTable head={{ cells: ['Policy', 'Target field', 'Type', 'Spaces', 'Protection', 'Status', 'Last run', 'Last change', 'Actions'].map(item => ({ key: item, content: item })) }} rows={visiblePolicies.map(policy => ({ key: policy.id, cells: [
         { content: policy.name }, { content: fieldName(policy.targetFieldId) }, { content: behaviorOptions.find(item => item.value === policy.behaviorType)?.label || policy.behaviorType },
-        { content: String(policy.projectIds.length) }, { content: policy.protect ? 'Restore' : 'Off' }, { content: <Lozenge appearance={policy.status === 'active' ? 'success' : policy.lastValidatedKey ? 'inprogress' : 'default'}>{policy.status === 'active' ? 'Active' : policy.lastValidatedKey ? 'Validated' : 'Draft'}</Lozenge> },
+        { content: String(policy.projectIds.length) }, { content: policy.protect ? 'Restore' : 'Off' }, { content: <Lozenge appearance={policy.status === 'active' ? 'success' : hasCurrentValidation(policy) ? 'inprogress' : 'default'}>{policy.status === 'active' ? 'Active' : hasCurrentValidation(policy) ? 'Validated' : 'Draft'}</Lozenge> },
         { content: policy.lastRunAt ? new Date(policy.lastRunAt).toLocaleString() : 'Never' },
-        { content: new Date(policy.updatedAt).toLocaleString() }, { content: <ButtonGroup><Button isDisabled={policy.status === 'active'} onClick={() => start(policy)}>Edit</Button>{policy.status === 'active' ? <Button isDisabled={saving} onClick={() => setActivation(policy, false)}>Deactivate</Button> : <Button appearance="primary" isDisabled={saving || policy.behaviorType !== 'assessment' || !policy.lastValidatedKey} onClick={() => setActivation(policy, true)}>Activate</Button>}<Button appearance="danger" isDisabled={policy.status === 'active'} onClick={() => { setDeleteCandidate(policy); setError(''); }}>Delete</Button></ButtonGroup> }
+        { content: new Date(policy.updatedAt).toLocaleString() }, { content: <ButtonGroup><Button onClick={() => start(policy)}>{policy.status === 'active' ? 'Open' : 'Edit'}</Button><Button appearance="danger" isDisabled={policy.status === 'active'} onClick={() => { setDeleteCandidate(policy); setError(''); }}>Delete</Button></ButtonGroup> }
+
       ] }))} emptyView={<Text>No saved policies match this view.</Text>} rowsPerPage={10} />
       {deleteCandidate && <SectionMessage title="Delete this policy?" appearance="warning"><Text>“{deleteCandidate.name}” will be permanently removed from this private app installation.</Text><ButtonGroup><Button appearance="danger" isDisabled={saving} onClick={removePolicy}>{saving ? 'Deleting…' : 'Confirm delete'}</Button><Button onClick={() => setDeleteCandidate(null)}>Cancel</Button></ButtonGroup></SectionMessage>}
       {error && <SectionMessage title="Policy action failed" appearance="error"><Text>{error}</Text></SectionMessage>}

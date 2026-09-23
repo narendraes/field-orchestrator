@@ -67,7 +67,7 @@ async function processPolicy(policy, event) {
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify({ fields: { [policy.targetFieldId]: nextValue } })
     }), 'Target field update');
-    await retainRun(policy, event, policy.protect ? 'restored' : 'changed', startedAt, jiraRequests, `${policy.targetFieldId} updated after Jira expression matched.`);
+    await retainRun(policy, event, policy.protect && event.changelog?.items?.some(item => item.fieldId === policy.targetFieldId) ? 'restored' : 'changed', startedAt, jiraRequests, `${policy.targetFieldId} updated after Jira expression matched.`);
     return true;
   } catch (error) {
     await retainRun(policy, event, 'error', startedAt, jiraRequests, error.message);
@@ -111,6 +111,9 @@ export async function handleFilteredIssueUpdate(event) {
     && policy.behaviorType === 'assessment'
     && policy.projectIds.includes(projectId)
   );
+  if (event.eventType === 'avi:jira:created:issue') {
+    policies.forEach(policy => policy.runtime?.dependencyFieldIds?.forEach(id => changedFieldIds.add(id)));
+  }
   try {
     for (const policy of topologicalPolicies(policies)) {
       if (!policy.runtime?.dependencyFieldIds?.some(fieldId => changedFieldIds.has(fieldId))) continue;

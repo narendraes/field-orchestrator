@@ -7,6 +7,15 @@ modules:
       render: native
       title: Field Orchestrator
   trigger:
+    - key: field-orchestrator-filtered-issue-create
+      function: runtime
+      events:
+        - avi:jira:created:issue
+      filter:
+        ignoreSelf: true
+        expression: |
+          event.runtime.project.properties['field-orchestrator-runtime-v1'].active == true
+        onError: IGNORE_AND_LOG
     - key: field-orchestrator-filtered-issue-update
       function: runtime
       events:

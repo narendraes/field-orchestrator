@@ -18,7 +18,7 @@ The policy model is target-first:
 4. Review the readable policy summary and protection intent.
 5. Test against a representative work-item key before activation.
 
-## Implemented and deployed
+## Recovered implementation (deployment pending)
 
 ### Administration experience
 
@@ -161,3 +161,14 @@ See `docs/runtime-architecture.md` for the event pipeline, entity-property schem
 - Hierarchy traversal deeper than grandchildren.
 - Cross-product orchestration outside Jira/JPD.
 - Detailed cost analytics and Marketplace packaging.
+
+## Recovery and editor lifecycle — September 23, 2026
+
+Recovered locally; not yet deployed or live-site acceptance tested:
+- Saves assign a fresh revision and clear activation eligibility. Successful validation must match the saved revision and configuration; failures revoke eligibility.
+- Activation review returns a single-use token with a 15-minute expiry, dependencies, scope, chain neighbors, and estimates of 1/2/3 Jira requests for no match/no change/change. Activation rechecks the configuration and dependency graph.
+- Separate creation trigger uses the active project property and ignoreSelf. All assessment dependencies in that project are evaluated on creation because there is no changelog. This means one invocation for each external creation in an active project, even when conditions subsequently do not match.
+- Protection traces classify restoration only when the original external changelog includes the protected target.
+- Save draft stays in the editor. Save & validate saves first and tests the returned snapshot. After validation retention and readiness review succeed, Activate becomes available in the editor. Active policies can be opened and deactivated there; edits are blocked until deactivation. Back to policies replaces Cancel.
+- Existing fields, option pickers, project filters, assessment conditions, hierarchy and relationship previews, bounded results, and execution history are preserved. Ordered outcomes and automatic hierarchy/relationship processing remain pending.
+- Concurrent KVS array updates, cross-context option validity, and live expression compatibility still require acceptance/hardening; passing local mocks is not production certification.
