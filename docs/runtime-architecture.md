@@ -53,9 +53,9 @@ Only this compiled plan is read by the event handler. An active policy revision 
 
 Field updates use the changed-field dependency union. Work-item creation has a separate filtered trigger because it has no changelog. Hierarchy inheritance requires parent/child structural coverage. Relationship rollups require source-project scope plus separately filtered issue-link create/delete events and relevant issue updates. A policy cannot activate while one of those event paths is missing.
 
-- A pure evaluator slice now enforces candidate filters, empty numeric handling, and traversal bounds in local tests. The event handler does not call it yet; wiring is deliberately gated on source-project discovery and manifest link-trigger coverage.
+- Live validation now calls the shared evaluator after Jira-side filtering. The event handler does not call it; automatic relationship processing remains blocked by the trigger limitation below.
 
-The first relationship implementation will use the MDP-2 pattern as its acceptance case: a JPD target field rolls up Story Points from linked Jira Features through the configured `implements / is implemented by` link, traversing children and grandchildren and filtering candidates by Status category. Empty Story Points contribute zero, and an unchanged total produces no write. The runtime must discover source projects during configuration, project their dependency index, and recalculate on source-value, status, parent, and link changes.
+The first relationship implementation will use the ABC-123 pattern as its acceptance case: a JPD target field rolls up Story Points from linked Jira Features through the configured `implements / is implemented by` link, traversing children and grandchildren and filtering candidates by Status category. Empty Story Points contribute zero, and an unchanged total produces no write. The runtime must discover source projects during configuration, project their dependency index, and recalculate on source-value, status, parent, and link changes.
 
 ## Protection and conflict model
 
@@ -178,3 +178,15 @@ Recovered locally; not yet deployed or live-site acceptance tested:
 - Save draft stays in the editor. Save & validate saves first and tests the returned snapshot. After validation retention and readiness review succeed, Activate becomes available in the editor. Active policies can be opened and deactivated there; edits are blocked until deactivation. Back to policies replaces Cancel.
 - Existing fields, option pickers, project filters, assessment conditions, hierarchy and relationship previews, bounded results, and execution history are preserved. Ordered outcomes and automatic hierarchy/relationship processing remain pending.
 - Concurrent KVS array updates, cross-context option validity, and live expression compatibility still require acceptance/hardening; passing local mocks is not production certification.
+
+## Source-scope and evaluator integration — September 23, 2026
+
+Implemented locally; not deployed:
+- Relationship policies persist separate source project IDs. The editor selects source spaces explicitly; legacy drafts require that selection before testing. Selection is manual, not automatic discovery.
+- Target scope identifies the work item receiving the derived value; source scope restricts linked roots and every traversed descendant through Jira JQL. Descendants outside source scope do not contribute and are not traversed.
+- Live relationship tests now use the shared calculation module after Jira applies configured filters in JQL. No extra product trigger or event invocation has been added.
+- Search pagination and the combined hierarchy fail validation above 500 items. The evaluator rejects excessive depth/candidates rather than certifying a partial total. Duplicate work-item keys contribute once, invalid numeric values fail, conflicting copy values fail, union preserves typed objects, and empty min/max results are null.
+- Relationship activation remains blocked in the resolver and editor. The documented link-event payload has source/destination issue and project IDs, but no link-type ID. Entity-property filtering on link events resolves the source side only. Consequently the previously planned dynamic link-type manifest filter cannot be built from documented data. No broad event subscription has been substituted.
+- Automatic rollups require a revised, explicitly accepted trigger contract (for example source-project/pair filtering with relationship resolution after invocation), or a platform-supported link-type projection. Creation/deletion, old/new parent effects, permission/context checks, concurrent target writes and recovery must also pass acceptance tests before enabling writes.
+
+References: [Jira link events](https://developer.atlassian.com/platform/forge/events-reference/jira/#issue-link-events), [entity-property event filtering](https://developer.atlassian.com/platform/forge/events-reference/product_events/#filtering-by-entity-properties).

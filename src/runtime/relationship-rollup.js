@@ -20,7 +20,9 @@ const equals = (actual, expected) => Array.isArray(actual)
   : displayValue(actual) === String(expected);
 
 export function candidateMatches(candidate, filters = []) {
-  return filters.slice(0, MAX_FILTERS).every(filter => {
+  if (filters.length > MAX_FILTERS) throw new Error('Too many relationship filters.');
+  return filters.every(filter => {
+    if (!['equals', 'notEquals', 'isEmpty', 'isNotEmpty'].includes(filter.operator)) throw new Error('Unsupported relationship filter operator.');
     const actual = fieldValue(candidate, filter.fieldId);
     if (filter.operator === 'isEmpty') return isEmpty(actual);
     if (filter.operator === 'isNotEmpty') return !isEmpty(actual);
@@ -30,23 +32,32 @@ export function candidateMatches(candidate, filters = []) {
 }
 
 export function calculateRelationshipRollup({ candidates = [], filters = [], sourceFieldId, aggregation = 'sum' }) {
-  const bounded = candidates.filter(candidate => Number(candidate.depth ?? 0) <= MAX_DEPTH).slice(0, MAX_CANDIDATES);
+  // Never certify a partial total: bounds violations stop evaluation.
+  if (candidates.length > MAX_CANDIDATES) throw new Error('Relationship exceeds 500 candidates; narrow the scope.');
+  if (candidates.some(candidate => !Number.isInteger(candidate.depth ?? 0) || (candidate.depth ?? 0) < 0 || (candidate.depth ?? 0) > MAX_DEPTH)) throw new Error('Unsupported hierarchy depth.');
+  if (!['sum', 'count', 'copy', 'min', 'max', 'union'].includes(aggregation)) throw new Error('Unsupported aggregation.');
+  const bounded = [...new Map(candidates.map((candidate, index) => [candidate.key || index, candidate])).values()];
   const matching = bounded.filter(candidate => candidateMatches(candidate, filters));
   const values = matching.map(candidate => fieldValue(candidate, sourceFieldId));
-  const numeric = values.filter(value => !isEmpty(value)).map(Number).filter(Number.isFinite);
+  const present = values.filter(value => !isEmpty(value));
+  const numeric = present.map(value => typeof value === 'number' || (typeof value === 'string' && value.trim()) ? Number(value) : NaN);
+  if (['sum', 'min', 'max'].includes(aggregation) && numeric.some(value => !Number.isFinite(value))) throw new Error('A source value is not numeric; no total was calculated.');
 
   if (aggregation === 'count') return { matching, contributingCount: matching.length, value: matching.length };
   if (aggregation === 'copy') {
-    const value = values.find(item => !isEmpty(item));
+    if (new Set(present.map(displayValue)).size > 1) throw new Error('Copy has multiple different values. Choose an aggregation.');
+    const value = present[0];
     return { matching, contributingCount: value === undefined ? 0 : 1, value: value ?? null };
   }
-  if (aggregation === 'min') return { matching, contributingCount: numeric.length, value: numeric.length ? Math.min(...numeric) : 0 };
-  if (aggregation === 'max') return { matching, contributingCount: numeric.length, value: numeric.length ? Math.max(...numeric) : 0 };
+  if (aggregation === 'min') return { matching, contributingCount: numeric.length, value: numeric.length ? Math.min(...numeric) : null };
+  if (aggregation === 'max') return { matching, contributingCount: numeric.length, value: numeric.length ? Math.max(...numeric) : null };
   if (aggregation === 'union') {
-    const unique = [...new Set(values.flatMap(value => Array.isArray(value) ? value.map(displayValue) : [displayValue(value)]).filter(Boolean))];
+    const unique = [...new Map(present.flatMap(value => Array.isArray(value) ? value : [value]).map(value => [displayValue(value), value])).values()];
     return { matching, contributingCount: unique.length, value: unique };
   }
-  return { matching, contributingCount: numeric.length, value: numeric.reduce((total, value) => total + value, 0) };
+  const total = numeric.reduce((sum, value) => sum + value, 0);
+  if (!Number.isFinite(total)) throw new Error('Numeric rollup overflow.');
+  return { matching, contributingCount: numeric.length, value: total };
 }
 
 export const relationshipLimits = Object.freeze({

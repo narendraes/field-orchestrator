@@ -28,3 +28,13 @@ test('active policies cannot be edited',async()=>{const{h,p}=await ready();const
 for(const [fields,outcome] of [[['source'],'changed'],[['target'],'restored'],[['source','target'],'restored']])test('protected '+fields.join('+')+' classifies '+outcome,async()=>{const h=await harness(true);h.store.set('field-policies:v1',[{...draft,status:'active',protect:true,runtime:{expression:'true',dependencyFieldIds:['source','target'],compiledTargetValue:'A'}}]);await h.run({issue:{key:'ABC-1',fields:{project:{id:'1'}}},changelog:{items:fields.map(fieldId=>({fieldId}))}});assert.equal(h.store.get('policy-runs:v1')[0].outcome,outcome);});
 for(const matches of [true,false])test('creation '+(matches?'writes':'no match skips'),async()=>{const h=await harness(true);h.state.matches=matches;h.store.set('field-policies:v1',[{...draft,status:'active',runtime:{expression:'true',dependencyFieldIds:['source'],compiledTargetValue:'A'}}]);await h.run({eventType:'avi:jira:created:issue',issue:{key:'ABC-1',fields:{project:{id:'1'}}}});assert.equal(h.state.target,matches?'A':'old');});
 test('equivalent target suppresses writes and traces',async()=>{const h=await harness(true);h.state.target='A';h.store.set('field-policies:v1',[{...draft,status:'active',runtime:{expression:'true',dependencyFieldIds:['source'],compiledTargetValue:'A'}}]);await h.run({eventType:'avi:jira:created:issue',issue:{key:'ABC-1',fields:{project:{id:'1'}}}});assert.equal(h.calls.some(x=>x.options.method==='PUT'),false);assert.equal(h.store.has('policy-runs:v1'),false);});
+
+test('relationship source spaces survive save and revision-bound validation', async () => {
+ const h = await harness();
+ const p = await h.h.savePolicy({payload:{...draft,behaviorType:'relationship',sourceProjectIds:['2','3','2'],linkTypeId:'9',relatedIssueTypeIds:['4'],sourceFieldId:'source',aggregation:'sum'}});
+ assert.deepEqual(Array.from(p.sourceProjectIds), ['2','3']);
+ await validate(h,p);
+ await assert.rejects(h.h.reviewPolicyActivation({payload:{id:p.id}}), /link-type ID/);
+ const reviewWrites=h.calls.filter(call=>call.options.method==='PUT');
+ assert.equal(reviewWrites.length,0);
+});

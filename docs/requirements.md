@@ -142,7 +142,7 @@ The policy model is target-first:
 - Setting or clearing Story Points later, moving the item into or out of a configured Status/Status category, changing its parent, or changing the relevant Jira relationship must request recalculation.
 - Creating a work item with a qualifying source value already populated must also request recalculation. Creation and structural events require their own manifest-filtered triggers before activation.
 - After any recalculation, an unchanged aggregate must not produce a Jira target-field write.
-- The first implementation slice includes a bounded, schema-neutral relationship evaluator used by tests. It filters candidates by typed values, supports Status category and multi-select comparisons, excludes empty numeric values from sums, and caps traversal at 500 candidates and grandchildren. It is not wired to activation or product events yet; source-project discovery, link triggers, and Jira writes remain pending.
+- The shared relationship evaluator is connected to live read-only tests after Jira-side filtering. Source spaces are explicitly selected. Bounds violations fail validation; automatic relationship processing remains blocked by the documented trigger limitation below.
 
 
 ### Read-only validation
@@ -203,7 +203,7 @@ The next code slice is the relationship-rollup runtime, delivered behind the sam
 
 1. Add source-project discovery and scope to the relationship policy schema. The target JPD space alone cannot identify every Jira project whose linked work can change the total.
 2. Add separately filtered issue-link create/delete triggers and a source-update dependency index. The manifest must carry the configured link-type and project checks before a relationship policy can activate.
-3. Compile relationship plans with explicit traversal, candidate, filter, and value bounds. The MDP-2 acceptance case is a linked Feature rollup through children and grandchildren, filtered by Status category.
+3. Compile relationship plans with explicit traversal, candidate, filter, and value bounds. The ABC-123 acceptance case is a linked Feature rollup through children and grandchildren, filtered by Status category.
 4. Evaluate only matching candidates, treat empty numeric values as non-contributing, compare normalized totals, and suppress equivalent writes.
 5. Add ordered decision cases and deterministic default/no-match behavior for multiple outcomes targeting the same field.
 6. Extend the same compiler and runtime plan to hierarchy inheritance.
@@ -229,3 +229,15 @@ Recovered locally; not yet deployed or live-site acceptance tested:
 - Save draft stays in the editor. Save & validate saves first and tests the returned snapshot. After validation retention and readiness review succeed, Activate becomes available in the editor. Active policies can be opened and deactivated there; edits are blocked until deactivation. Back to policies replaces Cancel.
 - Existing fields, option pickers, project filters, assessment conditions, hierarchy and relationship previews, bounded results, and execution history are preserved. Ordered outcomes and automatic hierarchy/relationship processing remain pending.
 - Concurrent KVS array updates, cross-context option validity, and live expression compatibility still require acceptance/hardening; passing local mocks is not production certification.
+
+## Source-scope and evaluator integration — September 23, 2026
+
+Implemented locally; not deployed:
+- Relationship policies persist separate source project IDs. The editor selects source spaces explicitly; legacy drafts require that selection before testing. Selection is manual, not automatic discovery.
+- Target scope identifies the work item receiving the derived value; source scope restricts linked roots and every traversed descendant through Jira JQL. Descendants outside source scope do not contribute and are not traversed.
+- Live relationship tests now use the shared calculation module after Jira applies configured filters in JQL. No extra product trigger or event invocation has been added.
+- Search pagination and the combined hierarchy fail validation above 500 items. The evaluator rejects excessive depth/candidates rather than certifying a partial total. Duplicate work-item keys contribute once, invalid numeric values fail, conflicting copy values fail, union preserves typed objects, and empty min/max results are null.
+- Relationship activation remains blocked in the resolver and editor. The documented link-event payload has source/destination issue and project IDs, but no link-type ID. Entity-property filtering on link events resolves the source side only. Consequently the previously planned dynamic link-type manifest filter cannot be built from documented data. No broad event subscription has been substituted.
+- Automatic rollups require a revised, explicitly accepted trigger contract (for example source-project/pair filtering with relationship resolution after invocation), or a platform-supported link-type projection. Creation/deletion, old/new parent effects, permission/context checks, concurrent target writes and recovery must also pass acceptance tests before enabling writes.
+
+References: [Jira link events](https://developer.atlassian.com/platform/forge/events-reference/jira/#issue-link-events), [entity-property event filtering](https://developer.atlassian.com/platform/forge/events-reference/product_events/#filtering-by-entity-properties).

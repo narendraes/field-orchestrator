@@ -126,6 +126,7 @@ function validatePolicy(input) {
     targetFieldId,
     projectIds,
     behaviorType,
+    sourceProjectIds: stringList(input?.sourceProjectIds),
     sourceFieldId: text(input?.sourceFieldId, 100),
     linkTypeId: text(input?.linkTypeId, 100),
     relatedIssueTypeIds: stringList(input?.relatedIssueTypeIds, 50),
@@ -277,6 +278,7 @@ async function writeProjectIndex(projectId, policies) {
 
 async function prepareActivation(policy, policies) {
   if (!policy) throw new Error('The policy no longer exists.');
+  if (policy.behaviorType === 'relationship') throw new Error('Relationship activation is blocked: documented Jira link events do not expose the link-type ID required by this app’s manifest filter. Source scope and live validation are available.');
   if (policy.behaviorType !== 'assessment') throw new Error('The first runtime release activates field-assessment policies only.');
   if (!policy.revision || policy.lastValidatedRevision !== policy.revision || !policy.lastValidatedKey) throw new Error('Run a successful validation on a representative work item before activation.');
   const conflict = policies.find(item => item.id !== policy.id && item.status === 'active' && item.targetFieldId === policy.targetFieldId && item.projectIds.some(id => policy.projectIds.includes(id)));

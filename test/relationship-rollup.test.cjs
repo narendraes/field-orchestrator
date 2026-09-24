@@ -18,14 +18,13 @@ test('rolls up only To Do Features through bounded descendants', async () => {
     sourceFieldId: 'storyPoints',
     aggregation: 'sum',
     candidates: [
-      { key: 'DO-1', depth: 0, statusCategory: 'In Progress', fields: { storyPoints: 8 } },
-      { key: 'DO-2', depth: 1, statusCategory: 'To Do', fields: { storyPoints: 3 } },
-      { key: 'DO-3', depth: 2, statusCategory: 'To Do', fields: { storyPoints: null } },
-      { key: 'DO-4', depth: 3, statusCategory: 'To Do', fields: { storyPoints: 99 } }
+      { key: 'ABC-1', depth: 0, statusCategory: 'In Progress', fields: { storyPoints: 8 } },
+      { key: 'ABC-2', depth: 1, statusCategory: 'To Do', fields: { storyPoints: 3 } },
+      { key: 'ABC-3', depth: 2, statusCategory: 'To Do', fields: { storyPoints: null } }
     ]
   });
   assert.equal(result.value, 3);
-  assert.deepEqual(result.matching.map(item => item.key), ['DO-2', 'DO-3']);
+  assert.deepEqual(Array.from(result.matching, item => item.key), ['ABC-2', 'ABC-3']);
   assert.equal(result.contributingCount, 1);
 });
 
@@ -49,7 +48,20 @@ test('multi-select and empty filters use typed values', async () => {
 test('relationship evaluation is bounded', async () => {
   const { calculateRelationshipRollup, relationshipLimits } = await load();
   const candidates = Array.from({ length: relationshipLimits.maxCandidates + 5 }, (_, index) => ({ depth: 1, fields: { points: 1 }, key: 'ABC-' + index }));
-  const result = calculateRelationshipRollup({ candidates, sourceFieldId: 'points', aggregation: 'sum' });
-  assert.equal(result.matching.length, relationshipLimits.maxCandidates);
-  assert.equal(result.value, relationshipLimits.maxCandidates);
+  assert.throws(() => calculateRelationshipRollup({ candidates, sourceFieldId: 'points', aggregation: 'sum' }), /500 candidates/);
+});
+
+test('rejects unsupported depth, nonnumeric values and ambiguous copy', async () => {
+  const { calculateRelationshipRollup: calculate } = await load();
+  assert.throws(() => calculate({ candidates: [{ depth: 3 }] }), /depth/);
+  assert.throws(() => calculate({ candidates: [{ fields: { x: 'oops' } }], sourceFieldId: 'x' }), /not numeric/);
+  assert.throws(() => calculate({ candidates: [{ fields: { x: 1 } }, { fields: { x: 2 } }], sourceFieldId: 'x', aggregation: 'copy' }), /multiple/);
+});
+test('deduplicates linked candidates and preserves typed union objects', async () => {
+  const { calculateRelationshipRollup: calculate } = await load();
+  const item = { key: 'ABC-1', fields: { x: 3 } };
+  assert.equal(calculate({ candidates: [item, item], sourceFieldId: 'x' }).value, 3);
+  const result = calculate({ candidates: [{ fields: { x: [{ id: '7', value: 'Risk' }] } }], sourceFieldId: 'x', aggregation: 'union' });
+  assert.equal(result.value[0].id, '7');
+  assert.equal(calculate({ candidates: [], aggregation: 'min' }).value, null);
 });

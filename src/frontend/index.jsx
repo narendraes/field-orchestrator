@@ -4,6 +4,7 @@ import ForgeReconciler, {
   Label, Lozenge, SectionMessage, Select, Stack, Text, Textfield, xcss
 } from '@forge/react';
 import { invoke, requestJira } from '@forge/bridge';
+import { calculateRelationshipRollup } from '../runtime/relationship-rollup';
 
 const choice = (label, value = label) => ({ label, value });
 const choices = values => values.map(value => choice(value));
@@ -95,7 +96,7 @@ function filterJql(filter) {
 
 const blankPolicy = () => ({
   id: '', name: '', targetFieldId: '', projectIds: [], behaviorType: 'assessment',
-  sourceFieldId: '', linkTypeId: '', relatedIssueTypeIds: [], hierarchyDepth: 0,
+  sourceProjectIds: [], sourceFieldId: '', linkTypeId: '', relatedIssueTypeIds: [], hierarchyDepth: 0,
   aggregation: 'copy', conditionMatch: 'AND',
   conditions: [{ fieldId: '', operator: 'equals', value: '' }],
   filters: [],
@@ -325,6 +326,7 @@ function App() {
       issues.push(...(Array.isArray(data.issues) ? data.issues : []));
       nextPageToken = data.nextPageToken || '';
     } while (nextPageToken && issues.length < 500);
+    if (nextPageToken || issues.length > 500) throw new Error('The test exceeds 500 work items. Narrow the scope; a partial total cannot be validated.');
     return issues;
   }
 
@@ -403,20 +405,6 @@ function App() {
 
     const normalized = selected.map(option => ({ id: option.id, value: option.value ?? option.name ?? option.label }));
     return schema.type === 'array' ? normalized : normalized[0];
-  }
-
-  function aggregateCandidates(policy, candidates) {
-    const included = candidates.filter(item => item.included);
-    if (policy.aggregation === 'count') return included.length;
-    const values = included.map(item => item.rawValue).filter(value => value !== null && value !== undefined && value !== '');
-    if (policy.aggregation === 'sum') return values.reduce((total, value) => total + (Number(value) || 0), 0);
-    if (policy.aggregation === 'min') return values.length ? Math.min(...values.map(Number)) : null;
-    if (policy.aggregation === 'max') return values.length ? Math.max(...values.map(Number)) : null;
-    if (policy.aggregation === 'union') {
-      const flattened = values.flatMap(value => Array.isArray(value) ? value : [value]);
-      return [...new Map(flattened.map(value => [displayValue(value), value])).values()];
-    }
-    return values[0] ?? null;
   }
 
   async function runPreview() {
@@ -524,18 +512,21 @@ function App() {
       }
 
       const linkedKeys = [...new Set((source.fields?.issuelinks || []).filter(link => String(link.type?.id) === String(draft.linkTypeId)).map(link => link.inwardIssue?.key || link.outwardIssue?.key).filter(Boolean))];
+      if (!(draft.sourceProjectIds || []).length) throw new Error('Choose source spaces containing the linked roots and their descendants before testing.');
+      const sourceScope = `project in (${draft.sourceProjectIds.map(jqlString).join(',')})`;
       const rootTypeClause = `issuetype in (${draft.relatedIssueTypeIds.map(jqlString).join(',')})`;
-      const roots = linkedKeys.length ? await searchIssues(`key in (${linkedKeys.map(jqlString).join(',')}) AND ${rootTypeClause}`, ['issuetype', 'parent'], metrics) : [];
+      const roots = linkedKeys.length ? await searchIssues(`key in (${linkedKeys.map(jqlString).join(',')}) AND ${rootTypeClause} AND ${sourceScope}`, ['issuetype', 'parent'], metrics) : [];
       const discovered = roots.map(issue => ({ issue, depth: 0 }));
       let parents = roots;
       for (let depth = 1; depth <= Number(draft.hierarchyDepth) && parents.length; depth += 1) {
         const parentKeys = parents.map(issue => jqlString(issue.key)).join(',');
-        const children = await searchIssues(`parent in (${parentKeys})`, ['issuetype', 'parent'], metrics);
+        const children = await searchIssues(`parent in (${parentKeys}) AND ${sourceScope}`, ['issuetype', 'parent'], metrics);
         discovered.push(...children.map(issue => ({ issue, depth })));
         parents = children;
       }
       const depthByKey = new Map(discovered.map(item => [item.issue.key, item.depth]));
       const discoveredKeys = [...depthByKey.keys()];
+      if (discoveredKeys.length > 500) throw new Error('The hierarchy exceeds 500 unique work items. Narrow the source scope or depth. No partial total will be reported.');
       const configuredFilters = (draft.filters || []).map(filterJql);
       const filterClause = configuredFilters.length ? ` AND ${configuredFilters.map(clause => `(${clause})`).join(' AND ')}` : '';
       const keyChunks = [];
@@ -547,8 +538,10 @@ function App() {
         return { key: issue.key, workType: issue.fields?.issuetype?.name || '', depth: depthByKey.get(issue.key) || 0, included: true, rawValue, value: displayValue(rawValue) };
       });
       const currentValue = issueFieldValue(source, draft.targetFieldId);
-      const computedValue = aggregateCandidates(draft, candidates);
-      const contributingCount = candidates.filter(item => item.rawValue !== null && item.rawValue !== undefined && item.rawValue !== '').length;
+      // Jira already applied the configured filters in JQL. The shared evaluator only calculates.
+      const evaluated = calculateRelationshipRollup({ candidates: matchingIssues.map(issue => ({ ...issue, depth: depthByKey.get(issue.key) || 0 })), sourceFieldId: draft.sourceFieldId, aggregation: draft.aggregation });
+      const computedValue = evaluated.value;
+      const contributingCount = evaluated.contributingCount;
       await showPreview({ type: 'relationship', aggregation: draft.aggregation, sourceKey: source.key, affectedKey: source.key, linkedCount: linkedKeys.length, rootCount: roots.length, traversedCount: discoveredKeys.length, candidates, contributingCount, currentValue, computedValue, wouldChange: comparableValue(currentValue) !== comparableValue(computedValue) });
     } catch (exception) {
       await showPreview({ error: exception.message || 'The policy test could not be completed.' });
@@ -645,6 +638,8 @@ function App() {
       </Stack>}
 
       {draft.behaviorType === 'relationship' && <Stack space="space.150">
+        <Box><Label labelFor="source-spaces">Source spaces</Label><Select inputId="source-spaces" isMulti options={projects} value={projects.filter(item => (draft.sourceProjectIds || []).includes(item.value))} onChange={values => change({ sourceProjectIds: (values || []).map(item => item.value) })} /><HelperMessage>Select every space whose linked roots and descendants should contribute. Target spaces determine where the result belongs; source spaces determine which work is counted.</HelperMessage></Box>
+        <SectionMessage appearance="warning" title="Live test available; activation blocked"><Text>Jira link events do not expose the relationship type needed for precise trigger filtering. Automatic relationship processing is unavailable until that trigger limitation is resolved.</Text></SectionMessage>
         <SectionMessage appearance="discovery" title="How relationship rollups work"><Text>Find linked work of the selected type on either side of the relationship, optionally traverse its hierarchy, filter candidates, then calculate the target value.</Text></SectionMessage>
         <Inline grow="fill" shouldWrap space="space.200" rowSpace="space.150">
           <Box xcss={columnStyles}><Label labelFor="related-work-types">Related work type</Label><Select inputId="related-work-types" isMulti options={issueTypes} value={issueTypes.filter(item => (draft.relatedIssueTypeIds || []).includes(item.value))} onChange={values => change({ relatedIssueTypeIds: (values || []).map(item => item.value) })} /><HelperMessage>Only linked roots with these Jira work types start the traversal.</HelperMessage></Box>
