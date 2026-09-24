@@ -208,3 +208,18 @@ Implemented locally, pending deployment and live acceptance:
 Forge CLI successfully deployed version 5.4.0 to the private development environment from source commit 68fb2cc. The existing development Jira installation was confirmed on app major version 5. No new scopes were introduced by the telemetry changes. All 25 local tests and Forge lint passed. This supersedes earlier pending-deployment notes for the recovered assessment runtime, source-scoped relationship preview and temporary diagnostics; live-site behavior has not yet been acceptance tested. Relationship and hierarchy automatic writes remain unavailable.
 
 Acceptance sequence: in a dedicated test project, configure a field assessment using a numeric custom source equal to 11 and a text target set to Ready, with protection enabled. Save and validate, activate, enable Diagnostics for 24 hours, change source from 0 to 11, then verify the target and refresh diagnostics. Overwrite the protected target while source stays 11 to test restoration. Set source to 0 to test no-match behavior (target is not cleared). Deactivate and verify later changes are not processed. Validation and activation do not backfill existing work items.
+
+## Live target-update acceptance — September 24, 2026
+
+The next delivery milestone is automatic relationship rollup into the configured Jira/JPD target field. A passing preview, a would-change trace, telemetry being enabled, or a successful deployment does not satisfy this milestone.
+
+Implementation order:
+1. Compile explicit source and target project dependencies and route relevant source changes to affected target items. Keep available project/changed-field gates in the manifest.
+2. Complete event coverage: point/filter changes, creation, old/new parent moves, deletion, and link creation/removal. Resolve the documented link-event filtering limitation before enabling the full policy type. No exception to the strict filter contract has been approved.
+3. Recalculate from current Jira state with bounded traversal and Jira-side candidate filtering. Deduplicate items, exclude empty numeric values, and fail on incomplete totals.
+4. Verify target schema/context and permissions; serialize competing writes, handle retries, compare normalized values, then update only changed totals. Account for app-originated downstream dependencies without event recursion.
+5. Enable activation only with complete event coverage, revision-bound validation and conflict/cycle checks. Prove the result on the actual target, and retain runtime evidence.
+
+Acceptance fixture: target ABC-123 in the selected JPD space, one matching linked root and child with 3 points. Change the child to 11 points without running manual validation. The selected JPD field must rise by 8. Check the target's actual history and correlated runtime trace. Then test entering/leaving the status filter, empty values, unrelated edits, parent moves, link removal, issue deletion, duplicate delivery, protection and deactivation. Verify old and new affected totals for structural moves. Do not mark runtime delivery Done without recorded live evidence.
+
+Current delivery: development 5.4.0 includes manual relationship validation and assessment runtime plus diagnostics. Automatic relationship/hierarchy writes remain unavailable; live acceptance is pending. Jira tracking references and reconciled statuses are in docs/jira-progress.md.

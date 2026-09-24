@@ -8,4 +8,4 @@ Revision-bound validation, failure invalidation, activation reviews and expiring
 
 ## Verification boundary
 
-Local regression tests use mocked Jira and KVS; they do not prove live Jira event delivery, expression compatibility, or rendered UI behavior. No recovery deployment has been made. Before deploying, review these limitations and perform acceptance against a controlled Jira test project. Existing concurrent storage and cross-context option limitations remain. Ordered outcomes and live relationship/hierarchy processing were never completed and remain pending.
+Local regression tests use mocked Jira and KVS; they do not prove live Jira event delivery, expression compatibility, or rendered UI behavior. Recovery and follow-up diagnostics were deployed to private development as version 5.4.0 on September 24, 2026. Deployment does not establish live acceptance. Before deploying, review these limitations and perform acceptance against a controlled Jira test project. Existing concurrent storage and cross-context option limitations remain. Ordered outcomes and live relationship/hierarchy processing were never completed and remain pending.
