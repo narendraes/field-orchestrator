@@ -1,8 +1,72 @@
 # Runtime architecture
 
-Last reconciled with `manifest.yml` and runtime source: 2026-09-20.
+Last reconciled with `manifest.yml` and runtime source: 2026-09-23.
 
 Field Orchestrator uses a fail-closed event pipeline. Jira should discard an irrelevant event before Forge starts a function.
+
+
+## Private no-code runtime boundary
+
+The runtime executes typed policy data compiled by the administrator UI. It is a small, site-local rules engine, not a general-purpose ScriptRunner replacement. Policies can express supported conditions, Jira Expressions, relationship traversal, hierarchy limits, calculations, target schemas, protection, and priority. They cannot upload JavaScript, call arbitrary URLs, read Forge storage from a Jira Expression, or introduce an unbounded loop.
+
+The compiler is the safety boundary:
+
+1. Validate the policy schema and target field context.
+2. Resolve every source, target, relationship, and structural dependency to stable IDs.
+3. Compile Boolean gates to Jira Expressions where Jira can evaluate them.
+4. Project the dependency union into Jira project entity properties used by manifest filters.
+5. Reject missing trigger coverage, unsupported data dependencies, overlapping target ownership, cycles, and bounds violations before activation.
+6. Store the compiled plan with the policy revision so a runtime event never interprets UI-only fields.
+
+A policy that cannot be compiled into this plan remains a preview-only draft and must explain the missing adapter or platform limitation.
+
+## Scale target and quota controls
+
+The private MVP is designed around a target of 100,000 changed work items per week in one site. This is a capacity target for the architecture, not a guarantee about Forge quotas or customer billing. The relevant load is the number of events that pass the manifest filter, not the number of fields listed in the editor.
+
+The implementation must enforce these controls:
+
+- One manifest-qualified event creates one runtime invocation. Changed fields are coalesced before policy evaluation.
+- The project dependency index routes the event to affected policies; inactive and unrelated policies are not scanned.
+- Jira Expressions perform Boolean gates with small results. Full issue reads are reserved for values or graph traversal.
+- Every calculation has explicit limits: ten conditions and related-work filters per policy in the current schema, hierarchy no deeper than grandchildren for the current relationship design, bounded candidate traversal, and ten displayed candidates in the UI.
+- A normalized no-change result skips the Jira write and does not create a per-event KVS history record.
+- Change, restore, error, conflict, cycle, and permission outcomes retain concise traces. High-volume no-change outcomes use counters or sampling, and Last run updates are coalesced.
+- KVS writes use revision checks and idempotent keys where an operation can be retried. Concurrent policy/index updates must not erase another administrator's change.
+- The UI reports response time, Jira request count, trace ID, and the applicable allowance category. It does not claim an exact dollar cost when the platform does not expose one.
+
+## Compiled policy plan
+
+The durable plan for an active policy contains:
+
+- `policyRevision` and lifecycle status;
+- selected project IDs and, for relationship policies, every source project whose changes can affect the target;
+- condition, source, target, filter, relationship, hierarchy, and protection dependency IDs;
+- a Jira Expression for Boolean gates when supported;
+- a schema-normalized target writer;
+- bounds, no-match behavior, and priority;
+- trace and last-run policy.
+
+Only this compiled plan is read by the event handler. An active policy revision is immutable. Editing creates a new draft revision and removes activation eligibility until validation and activation review complete again.
+
+## Structural event coverage
+
+Field updates use the changed-field dependency union. Work-item creation has a separate filtered trigger because it has no changelog. Hierarchy inheritance requires parent/child structural coverage. Relationship rollups require source-project scope plus separately filtered issue-link create/delete events and relevant issue updates. A policy cannot activate while one of those event paths is missing.
+
+- A pure evaluator slice now enforces candidate filters, empty numeric handling, and traversal bounds in local tests. The event handler does not call it yet; wiring is deliberately gated on source-project discovery and manifest link-trigger coverage.
+
+The first relationship implementation will use the MDP-2 pattern as its acceptance case: a JPD target field rolls up Story Points from linked Jira Features through the configured `implements / is implemented by` link, traversing children and grandchildren and filtering candidates by Status category. Empty Story Points contribute zero, and an unchanged total produces no write. The runtime must discover source projects during configuration, project their dependency index, and recalculate on source-value, status, parent, and link changes.
+
+## Protection and conflict model
+
+`ignoreSelf` is event-wide. It rejects the later product event created by any app-generated target write; it is not a per-field switch. Valid downstream derived-field policies therefore run in topological order within the original invocation. Protection adds the target to the dependency union so an external target edit can be restored, while the app's own restoration cannot re-enter the runtime.
+
+Activation rejects direct self-dependencies, indirect cycles, chains deeper than ten policies, and overlapping active writers for the same target and project scope. Ordered decision policies are the supported way to express several outcomes for one protected target; independent writers are never resolved by timing or “last write wins.”
+
+## Private installation and data boundary
+
+All policy, metadata, activation, trace, and quota state is scoped to the installing Atlassian site. No runtime path crosses sites. The app uses the minimum Jira and Forge scopes needed for the configured capabilities and does not put customer policy data in GitHub. Export/import, backup, and migration are future administrator features and must preserve site-specific IDs and require revalidation on the destination site.
+
 
 ## Event path
 
@@ -32,7 +96,7 @@ The first runtime gate uses the project entity property `field-orchestrator-runt
 
 The manifest reads only the primitive `active` value and primitive `fieldIds` array. Activation writes the union of active assessment dependencies. Deactivation rewrites that union and removes the property when the project has no active dependencies.
 
-The recovered manifest handles assessment updates and creation with separate filters. This recovery has not been deployed. Deletion, cross-project parent effects, and link events remain incomplete.
+The recovered manifest handles assessment updates and creation with separate filters. The recovery code still requires deployment and live-site acceptance testing. Deletion, cross-project parent effects, and link events remain incomplete.
 
 ## Dependency routing and no-change suppression
 

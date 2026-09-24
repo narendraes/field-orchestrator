@@ -1,10 +1,63 @@
 # Field Orchestrator requirements and delivery state
 
-Last reconciled with the application code and manifest: 2026-09-20.
+Last reconciled with the application code and manifest: 2026-09-23.
 
 Original product discussion: https://chatgpt.com/share/6aaacb7d-4c38-83ea-9cbc-3a24a476cb3c
 
 Field Orchestrator is currently a private Forge development app. It must remain private. Marketplace publication, public distribution, or a go-to-market release requires explicit owner authorization. Product UI, help text, sample keys, and distributable documentation must remain installation-neutral.
+
+
+## TL;DR: private no-code rule engine
+
+Field Orchestrator is a site-local, administrator-controlled rules engine for Jira and Jira Product Discovery. It provides a bounded, no-code subset of the work that teams otherwise implement in ScriptRunner or Jira Automation: derive a target field from typed conditions, hierarchy, or related work; protect the derived result; preview the result on a real work item; and explain every change.
+
+The product is intentionally configuration-driven rather than a general-purpose scripting platform. A policy is made from typed building blocks (fields, operators, values, relationships, hierarchy depth, filters, calculation, target write, protection, and priority). It does not accept arbitrary JavaScript, arbitrary network calls, hidden JQL, or a user-provided script. When a requirement cannot be represented by a supported block or a Jira Expression, the policy remains a draft with a visible limitation instead of silently falling back to JavaScript.
+
+The private installation boundary is part of the product design:
+
+- Each Atlassian site owns its policies, metadata, activation state, traces, and quota budget.
+- The app is installed and updated per site by an administrator. It is not a shared Marketplace service and has no cross-site policy execution.
+- Examples, test keys, project names, and documentation remain installation-neutral (`ABC-123`, not a development-site key).
+- GitHub is a source-control backup for this implementation, not a product data store or a channel for sharing customer policy data.
+
+The scale target for the private MVP is 100,000 changed work items per week in one site. This is a design target, not a platform guarantee. Manifest filtering, a compiled dependency index, one invocation per qualifying event, Jira Expressions for Boolean gates, narrow reads, idempotent writes, and bounded traces are required before a policy type can be activated at that scale.
+
+## Supported no-code capability model
+
+Every capability must fit this pipeline: **trigger dependencies → optional Jira Expression gate → source graph → typed conditions and filters → deterministic evaluation → schema-aware target value → protection and write policy → trace**.
+
+The initial capability families are:
+
+1. **Field assessment** — set one target value when conditions match.
+2. **Ordered decision** — set different values for ordered condition cases targeting the same field, with explicit overlap and no-match behavior.
+3. **Hierarchy inheritance** — copy or union a value from a parent, child, or bounded descendant path.
+4. **Relationship rollup** — traverse a configured Jira relationship and bounded hierarchy, filter candidates, then copy, count, sum, min, max, or union a source value.
+
+Later families may add scheduled reconciliation, status/health assessments, and additional Jira/JPD relationship adapters. They must use the same typed model and lifecycle. Atlas goals, OKRs, pull requests, external databases, and arbitrary custom code remain deferred integrations rather than implicit capabilities.
+
+The editor must expose the effective rule in readable language and show the exact fields and structural events that can cause it to run. A rule is not considered complete merely because its form can be saved: metadata context, target schema, permissions, trigger coverage, overlap, cycles, and quota impact must be reviewable.
+
+## Scale and operational requirements
+
+- **Filter before invocation.** Every product trigger must have a manifest expression that checks the active project property and the relevant changed field, created-item condition, or link type. JavaScript may evaluate a qualified event but may not replace a missing manifest filter.
+- **Compile once, route cheaply.** Activation compiles a per-project dependency index. A runtime invocation selects only policies affected by the event's changed fields or structural dependency; it does not scan every saved policy.
+- **One event, one invocation.** Several changed dependency fields are coalesced into one policy evaluation. Downstream derived fields run in topological order inside that invocation.
+- **No-op is a first-class result.** Missing numeric values do not contribute to sums, and an equivalent target value never creates a Jira write. No-change traces are sampled or aggregated rather than retained per event.
+- **Bounded work.** Each policy declares limits for conditions, relationship filters, hierarchy depth, candidate traversal, and target size. Activation rejects an unbounded graph, an unsupported value shape, a cycle, or a chain deeper than the configured maximum.
+- **Idempotent and concurrency-safe.** A retry recalculates from current Jira state, compares normalized values, and writes only when needed. Runtime writes carry a trace and are rejected by `ignoreSelf`; competing active policies cannot own the same target in overlapping scope.
+- **Quota-aware visibility.** The UI shows estimated Jira requests, response time, retained trace operations, and the relevant Forge allowance category. It must not present an exact dollar invoice when Atlassian does not expose one.
+- **Bounded observability.** Changes, restores, errors, activation reviews, and cycle/permission failures are traceable. High-volume no-change events are not individually written to KVS or Forge logs.
+- **Eventual consistency is explicit.** Product-trigger delivery may be delayed or duplicated. The UI and help text describe the last run and current-value reconciliation model; activation never promises transaction-level ordering.
+
+## Lifecycle and administration requirements
+
+The lifecycle is **Draft → Validated → Review ready → Active → Paused/Deactivated → Retired**. Saving creates a new revision and invalidates prior validation. Validation is read-only and revision-bound. Activation requires a fresh review token that lists dependencies, scope, conflict/cycle checks, and estimated request counts. Active policies cannot be edited; the administrator deactivates them first. Deactivation removes their projected dependency index and stops future processing without deleting history.
+
+Each active rule must show its owner scope, target, source dependencies, protection behavior, last run, last change, status, and a bounded execution trace. Permission or metadata drift must move the rule to an actionable error state rather than silently changing a field.
+
+## No-code boundary and unsupported rules
+
+Jira Expressions are used for Boolean checks that Jira can evaluate. Forge storage, Forge SQL, arbitrary external data, and calculations that Jira Expressions cannot access are not treated as hidden runtime inputs. Such a rule can remain a preview-only draft until its dependency is projected into a supported Jira entity property or a dedicated adapter is implemented. The UI must name that limitation and the event or quota consequence.
 
 ## Product objective
 
@@ -40,7 +93,7 @@ The policy model is target-first:
 
 - Policies persist in Forge KVS under `field-policies:v1` and are validated again in the backend resolver.
 - Maximum 100 saved policies per installation.
-- Every saved policy remains a `draft`; saving never activates it.
+- Saving creates a new revision and leaves the policy inactive. A saved revision becomes eligible for activation only after a successful read-only validation and activation review.
 - A policy requires a name, target field, and at least one Jira or JPD space.
 - Up to 10 assessment conditions and up to 10 relationship filters are accepted per policy.
 - Protection intent can be saved, but protection is not enforced while the policy is a draft.
@@ -89,6 +142,8 @@ The policy model is target-first:
 - Setting or clearing Story Points later, moving the item into or out of a configured Status/Status category, changing its parent, or changing the relevant Jira relationship must request recalculation.
 - Creating a work item with a qualifying source value already populated must also request recalculation. Creation and structural events require their own manifest-filtered triggers before activation.
 - After any recalculation, an unchanged aggregate must not produce a Jira target-field write.
+- The first implementation slice includes a bounded, schema-neutral relationship evaluator used by tests. It filters candidates by typed values, supports Status category and multi-select comparisons, excludes empty numeric values from sums, and caps traversal at 500 candidates and grandchildren. It is not wired to activation or product events yet; source-project discovery, link triggers, and Jira writes remain pending.
+
 
 ### Read-only validation
 
@@ -142,17 +197,19 @@ The policy model is target-first:
 
 See `docs/runtime-architecture.md` for the event pipeline, entity-property schema, and platform limitations.
 
-## Pending beyond the runtime pilot
+## Implementation roadmap
 
-1. Add ordered decision cases and deterministic default/no-match behavior for multiple outcomes targeting the same field. The pilot rejects overlapping active target ownership.
-3. Add source-project scope for relationship rollups. Target JPD scope alone cannot identify every Jira project whose child changes should trigger recalculation.
-4. Add separately filtered issue-link create/delete triggers with configured link-type dependency indexes.
-   Add a separately filtered issue-created path for work created with a qualifying source value; empty-value creation must not cause a target write.
-5. Extend Jira-expression evaluation and runtime writes to hierarchy and relationship calculations.
-6. Add stronger event idempotency and concurrent-update serialization beyond current-value no-change suppression and `ignoreSelf` recursion prevention.
-7. Aggregate high-volume counters and coalesce Last run updates without storing individual no-change traces.
-9. Measure quota and free-allowance consumption using representative event volumes.
-10. Complete acceptance testing before production readiness.
+The next code slice is the relationship-rollup runtime, delivered behind the same lifecycle gate as field assessment:
+
+1. Add source-project discovery and scope to the relationship policy schema. The target JPD space alone cannot identify every Jira project whose linked work can change the total.
+2. Add separately filtered issue-link create/delete triggers and a source-update dependency index. The manifest must carry the configured link-type and project checks before a relationship policy can activate.
+3. Compile relationship plans with explicit traversal, candidate, filter, and value bounds. The MDP-2 acceptance case is a linked Feature rollup through children and grandchildren, filtered by Status category.
+4. Evaluate only matching candidates, treat empty numeric values as non-contributing, compare normalized totals, and suppress equivalent writes.
+5. Add ordered decision cases and deterministic default/no-match behavior for multiple outcomes targeting the same field.
+6. Extend the same compiler and runtime plan to hierarchy inheritance.
+7. Add stronger event idempotency and concurrent-update serialization beyond current-value no-change suppression and `ignoreSelf` recursion prevention.
+8. Aggregate high-volume counters and coalesce Last run updates without storing individual no-change traces.
+9. Measure quota and free-allowance consumption with representative event volumes and complete live-site acceptance testing before production readiness.
 
 ## Deferred
 
