@@ -25,13 +25,15 @@ const jsonValue = (value, limit = 20) => {
   return null;
 };
 
-const jiraJson = async (request, description) => {
+const jiraJson = async (request, description, expectJson = true) => {
   const response = await request;
   if (!response.ok) {
     const body = await response.text();
     throw new Error(`${description} failed (${response.status})${body ? `: ${body.slice(0, 300)}` : '.'}`);
   }
-  return response.status === 204 ? null : response.json();
+  // Successful command endpoints can return an empty 200/201 as well as 204.
+  // Only data-reading callers require a JSON body; HTTP failures still throw.
+  return !expectJson || response.status === 204 ? null : response.json();
 };
 
 const isOptionSchema = schema => schema?.type === 'option' || schema?.items === 'option';
@@ -332,7 +334,7 @@ async function writeProjectIndex(projectId, policies) {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(projection)
-  }), `Updating the runtime index for project ${projectId}`);
+  }), `Updating the runtime index for project ${projectId}`, false);
 }
 
 async function prepareActivation(policy, policies) {

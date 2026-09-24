@@ -1,5 +1,10 @@
 # Field Orchestrator requirements and delivery state
 
+## Activation response parsing fix — September 24, 2026
+
+Deployed privately to development as 5.7.0. All 45 tests, ESLint and Forge lint pass. Project-property PUT responses are status-only commands and no longer parsed as JSON on success, including empty 200/201/204 responses. HTTP failures still block activation; data-reading endpoints still require valid JSON. This fixes the observed activation failure in writeProjectIndex after readiness review passed. An interrupted earlier activation may have written some project indexes, but did not commit active status; retrying activation overwrites the projections before saving active state. No permissions, filters, rule scope or automatic activation behavior changed. Regression coverage includes empty success responses and a rejected property write. Live activation acceptance remains pending.
+
+
 ## Target project size restriction removed — September 24, 2026
 
 Deployed privately to development as 5.6.0. All 41 automated tests, ESLint and Forge lint passed. Supersedes the ten-target limit in historical pilot notes below. Ten rows is a test-display limit only; activation no longer searches or rejects the whole target project. Activation checks the representative work item; runtime independently checks each target's project, editable numeric field, policy status and revision before writing.
