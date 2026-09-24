@@ -1,5 +1,14 @@
 # Field Orchestrator requirements and delivery state
 
+## Target project size restriction removed — September 24, 2026
+
+Deployed privately to development as 5.6.0. All 41 automated tests, ESLint and Forge lint passed. Supersedes the ten-target limit in historical pilot notes below. Ten rows is a test-display limit only; activation no longer searches or rejects the whole target project. Activation checks the representative work item; runtime independently checks each target's project, editable numeric field, policy status and revision before writing.
+
+Structural reconciliation discovers targets in pages of 25 with continuation jobs. Each target is evaluated in a separate serialized job with its own request budget. Ordinary source routing also queues each affected target separately. This adds queue invocations but avoids a project-sized evaluation in a single invocation. No target-project item-count cutoff is imposed. Pagination failures are explicit. Retries may rediscover targets; fresh calculation and unchanged-write suppression prevent duplicate writes. Old revision/deactivated jobs are ignored. No backfill on activation is added.
+
+Per-target hierarchy safeguards (500 candidates, two descendant levels, 250 requests), reverse-route diagnostic limits and five active relationship policies remain separate pilot constraints. No full-scale throughput guarantee is implied. Live activation and JPD write acceptance remain pending. Jira search indexing and concurrent scope changes are still eventually consistent.
+
+
 ## Numeric relationship runtime pilot — September 24, 2026
 
 Deployed privately to development as version 5.5.0 on September 24, 2026. All 39 automated tests, ESLint and Forge lint pass. Live acceptance remains pending; saved drafts were not automatically activated. This section supersedes the historical read-only relationship status below.

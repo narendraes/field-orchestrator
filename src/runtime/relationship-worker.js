@@ -6,7 +6,7 @@ import { traceRelationshipTargets } from './relationship-routing';
 
 const queue = new Queue({ key: 'relationship-jobs' });
 const quote = value => JSON.stringify(String(value));
-export const TARGET_LIMIT = 10;
+const TARGET_PAGE_SIZE = 25;
 
 // Two property paths are added to the existing active/fieldIds paths: total 4.
 // Link keys include the opposite project so unrelated project pairs are rejected.
@@ -45,6 +45,12 @@ export function jiraAccess(asUser = false) {
     requests: () => requests,
     readIssue: (key, fields) => request(route`/rest/api/3/issue/${key}?fields=${fields.join(',')}`),
     editmeta: key => request(route`/rest/api/3/issue/${key}/editmeta`),
+    searchTargetPage: async (jql, nextPageToken) => {
+      const page = await request(route`/rest/api/3/search/jql`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jql, fields: ['project'], maxResults: TARGET_PAGE_SIZE, ...(nextPageToken ? { nextPageToken } : {}) }) });
+      if (page.isLast === false && !page.nextPageToken) throw new Error('Incomplete target search; continuation unavailable.');
+      if (nextPageToken && page.nextPageToken === nextPageToken) throw new Error('Target search did not advance.');
+      return { targets: page.issues || [], nextPageToken: page.nextPageToken };
+    },
     searchIssues: async (jql, fields, limit = 500) => {
       const items = []; let nextPageToken;
       do {
@@ -94,6 +100,16 @@ export async function calculateTarget(policy, targetKey, jira) {
   return { current: target.fields?.[policy.targetFieldId] ?? null, value: result.value };
 }
 
+async function pushJob(body) {
+  try {
+    await queue.push({ body, concurrency: { key: 'relationship-writes-v1', limit: 1 }, delayInSeconds: 2 });
+  } catch (cause) {
+    const error = new Error('Could not queue remaining targets; discovery will retry.');
+    error.retryable = true;
+    throw error;
+  }
+}
+
 export async function enqueueRelationshipEvent(event) {
   // Invocation has already passed a manifest gate. Retain identifiers only.
   await queue.push({ body: {
@@ -107,6 +123,7 @@ export async function enqueueRelationshipEvent(event) {
 export async function runRelationshipJob({ body }) {
   const policies = (await kvs.get('field-policies:v1') || []).filter(policy => policy.status === 'active' && policy.behaviorType === 'relationship');
   for (const policy of policies) {
+    if (body.policyId && (policy.id !== body.policyId || policy.revision !== body.policyRevision)) continue;
     const plan = policy.runtime.plan;
     const source = plan.sourceProjectIds.includes(body.projectId), target = plan.targetProjectIds.includes(body.projectId);
     const isLink = body.eventType?.endsWith(':issuelink');
@@ -119,12 +136,26 @@ export async function runRelationshipJob({ body }) {
       // cannot reliably reveal old parents/links. This covers both old and new totals.
       const structural = !isUpdate || body.changedFields.some(id => ['parent', 'issuetype', 'project'].includes(id));
       let targets;
-      if (structural) targets = await jira.searchIssues(`project in (${plan.targetProjectIds.map(quote).join(',')})`, ['project'], TARGET_LIMIT);
+      if (body.targetKey) targets = [{ key: body.targetKey }];
+      else if (structural) {
+        // Page discovery and target evaluation are separate jobs. A large project
+        // does not exhaust one invocation's request/time budget or cap its scope.
+        const page = await jira.searchTargetPage(`project in (${plan.targetProjectIds.map(quote).join(',')}) ORDER BY key`, body.nextPageToken);
+        targets = page.targets;
+        for (const item of targets) await pushJob({ ...body, policyId: policy.id, policyRevision: policy.revision, targetKey: item.key, nextPageToken: undefined });
+        if (page.nextPageToken) await pushJob({ ...body, policyId: policy.id, policyRevision: policy.revision, nextPageToken: page.nextPageToken });
+        if (!targets.length) await recordRelationshipRun(policy, body, body.key, 'no-targets', started, jira.requests(), true);
+        continue;
+      }
       else {
         targets = source ? (await traceRelationshipTargets(plan, body.key, jira)).targets : [];
         if (target && policy.protect) targets.push({ key: body.key });
       }
-      if (new Set(targets.map(item => item.key)).size > TARGET_LIMIT) throw new Error('Affected targets exceed the private pilot limit; narrow the policy.');
+      if (!body.targetKey) {
+        for (const key of [...new Set(targets.map(item => item.key))]) await pushJob({ ...body, policyId: policy.id, policyRevision: policy.revision, targetKey: key });
+        if (!targets.length) await recordRelationshipRun(policy, body, body.key, 'no-targets', started, jira.requests(), true);
+        continue;
+      }
       if (!targets.length) await recordRelationshipRun(policy, body, body.key, 'no-targets', started, jira.requests(), true);
       for (const key of [...new Set(targets.map(item => item.key))]) {
         const result = await calculateTarget(policy, key, jira);

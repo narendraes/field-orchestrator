@@ -7,7 +7,7 @@ async function harness(runtime=false) {
  const store=new Map(), calls=[]; const state={target:'old',matches:true,admin:true,failDiagnostic:false,numeric:false};
  const kvs={get:async k=>structuredClone(store.get(k)),set:async(k,v)=>{if(state.failDiagnostic && k.startsWith('diagnostic-run:'))throw new Error('storage unavailable');store.set(k,structuredClone(v));},delete:async k=>store.delete(k)};
  class Resolver {constructor(){this.h={};} define(n,f){this.h[n]=f;} getDefinitions(){return this.h;}}
- const requestJira=async(url,options={})=>{calls.push({url,options});let data={};if(url.includes('/mypermissions'))data={permissions:{ADMINISTER:{havePermission:state.admin}}};else if(url.endsWith('/field'))data=['source','target'].map(id=>({id,schema:{type:state.numeric?'number':'string'}}));else if(url.includes('/search/jql'))data={issues:[{key:'ABC-1',fields:{project:{id:'1'}}}]};else if(url.endsWith('/editmeta'))data={fields:{target:{schema:{type:'number'}}}};else if(url.includes('/expression/'))data={value:state.matches};else if(options.method==='PUT'&&url.includes('/issue/'))state.target=JSON.parse(options.body).fields.target;else if(url.includes('/issue/'))data={key:'ABC-1',fields:{project:{id:'1'},target:state.target,issuelinks:[]}};return {ok:true,status:200,json:async()=>data};};
+ const requestJira=async(url,options={})=>{calls.push({url,options});let data={};if(url.includes('/mypermissions'))data={permissions:{ADMINISTER:{havePermission:state.admin}}};else if(url.endsWith('/field'))data=['source','target'].map(id=>({id,schema:{type:state.numeric?'number':'string'}}));else if(url.includes('/search/jql'))data={issues:Array.from({length:61},(_,i)=>({key:'ABC-'+(i+1),fields:{project:{id:'1'}}}))};else if(url.endsWith('/editmeta'))data={fields:{target:{schema:{type:'number'}}}};else if(url.includes('/expression/'))data={value:state.matches};else if(options.method==='PUT'&&url.includes('/issue/'))state.target=JSON.parse(options.body).fields.target;else if(url.includes('/issue/'))data={key:'ABC-1',fields:{project:{id:'1'},target:state.target,issuelinks:[]}};return {ok:true,status:200,json:async()=>data};};
  const api={asUser:()=>({requestJira}),asApp:()=>({requestJira})}; const route=(s,...v)=>s.reduce((a,x,i)=>a+x+(v[i]??''),'');
  const context=vm.createContext({console:{info(){},error(){},warn(){}},crypto:{randomUUID}});
  const mocks={'@forge/api':{default:api,route},'@forge/kvs':{kvs},'@forge/resolver':{default:Resolver}};
@@ -80,7 +80,7 @@ test('diagnostic controls require admin and preserve policy revision',async()=>{
  assert.equal(h.store.has('diagnostic-run:v1:p:0'),false);assert.equal(h.store.get('diagnostics:v1:p').until,0);
 });
 
-test('numeric relationship activation projects both source and target and deactivation removes it',async()=>{
+test('numeric activation succeeds in a 61-item project and projects both endpoints',async()=>{
  const h=await harness();h.state.numeric=true;
  const p=await h.h.savePolicy({payload:{...draft,behaviorType:'relationship',sourceProjectIds:['2'],sourceFieldId:'source',linkTypeId:'7',relatedIssueTypeIds:['9'],aggregation:'sum'}});
  await validate(h,p);

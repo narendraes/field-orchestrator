@@ -1,5 +1,5 @@
 import Resolver from '@forge/resolver';
-import { projectDependencies, jiraAccess, calculateTarget, filterClause, TARGET_LIMIT } from '../runtime/relationship-worker';
+import { projectDependencies, jiraAccess, calculateTarget, filterClause } from '../runtime/relationship-worker';
 import { compileRelationshipPlan, traceRelationshipTargets } from '../runtime/relationship-routing';
 import { kvs } from '@forge/kvs';
 import api, { route } from '@forge/api';
@@ -361,13 +361,10 @@ async function prepareActivation(policy, policies) {
     }
     const activePolicy = { ...policy, status: 'active', activatedAt: new Date().toISOString(), runtime: { plan: { ...plan, activationReady: true }, dependencyFieldIds: [...plan.sourceFieldIds, ...plan.targetFieldIds], targetSchema } };
     const jira = jiraAccess(true);
-    const targets = await jira.searchIssues(`project in (${plan.targetProjectIds.map(id => JSON.stringify(id)).join(',')})`, ['project'], TARGET_LIMIT);
-    if (!targets.some(item => item.key === policy.lastValidatedKey)) throw new Error('Validate a current work item in the selected target scope.');
-    // Verify every bounded target context, not just the representative option/context.
-    for (const target of targets) {
-      const metadata = await jira.editmeta(target.key);
-      if (metadata.fields?.[policy.targetFieldId]?.schema?.type !== 'number') throw new Error('Target field must be editable and numeric on every scoped target item.');
-    }
+    // Activation validates the representative context; each runtime target is
+    // checked independently before writing. Project size is not an eligibility rule.
+    const metadata = await jira.editmeta(policy.lastValidatedKey);
+    if (metadata.fields?.[policy.targetFieldId]?.schema?.type !== 'number') throw new Error('Target field must be editable and numeric on the representative work item.');
     await calculateTarget(activePolicy, policy.lastValidatedKey, jira);
     return { activePolicy, next: policies.map(item => item.id === policy.id ? activePolicy : item) };
   }
