@@ -4,15 +4,25 @@ const fs=require('node:fs');
 const vm=require('node:vm');
 const {randomUUID}=require('node:crypto');
 async function harness(runtime=false) {
- const store=new Map(), calls=[]; const state={target:'old',matches:true,admin:true,failDiagnostic:false};
+ const store=new Map(), calls=[]; const state={target:'old',matches:true,admin:true,failDiagnostic:false,numeric:false};
  const kvs={get:async k=>structuredClone(store.get(k)),set:async(k,v)=>{if(state.failDiagnostic && k.startsWith('diagnostic-run:'))throw new Error('storage unavailable');store.set(k,structuredClone(v));},delete:async k=>store.delete(k)};
  class Resolver {constructor(){this.h={};} define(n,f){this.h[n]=f;} getDefinitions(){return this.h;}}
- const requestJira=async(url,options={})=>{calls.push({url,options});let data={};if(url.includes('/mypermissions'))data={permissions:{ADMINISTER:{havePermission:state.admin}}};else if(url.endsWith('/field'))data=['source','target'].map(id=>({id,schema:{type:'string'}}));else if(url.includes('/expression/'))data={value:state.matches};else if(options.method==='PUT'&&url.includes('/issue/'))state.target=JSON.parse(options.body).fields.target;else if(url.includes('/issue/'))data={fields:{target:state.target}};return {ok:true,status:200,json:async()=>data};};
+ const requestJira=async(url,options={})=>{calls.push({url,options});let data={};if(url.includes('/mypermissions'))data={permissions:{ADMINISTER:{havePermission:state.admin}}};else if(url.endsWith('/field'))data=['source','target'].map(id=>({id,schema:{type:state.numeric?'number':'string'}}));else if(url.includes('/search/jql'))data={issues:[{key:'ABC-1',fields:{project:{id:'1'}}}]};else if(url.endsWith('/editmeta'))data={fields:{target:{schema:{type:'number'}}}};else if(url.includes('/expression/'))data={value:state.matches};else if(options.method==='PUT'&&url.includes('/issue/'))state.target=JSON.parse(options.body).fields.target;else if(url.includes('/issue/'))data={key:'ABC-1',fields:{project:{id:'1'},target:state.target,issuelinks:[]}};return {ok:true,status:200,json:async()=>data};};
  const api={asUser:()=>({requestJira}),asApp:()=>({requestJira})}; const route=(s,...v)=>s.reduce((a,x,i)=>a+x+(v[i]??''),'');
  const context=vm.createContext({console:{info(){},error(){},warn(){}},crypto:{randomUUID}});
  const mocks={'@forge/api':{default:api,route},'@forge/kvs':{kvs},'@forge/resolver':{default:Resolver}};
  const mod=new vm.SourceTextModule(fs.readFileSync(runtime?'src/runtime/issue-updated.js':'src/resolvers/index.js','utf8'),{context});
- await mod.link(n=>n==='../runtime/relationship-routing' ? new vm.SourceTextModule(fs.readFileSync('src/runtime/relationship-routing.js','utf8'),{context}) : new vm.SyntheticModule(Object.keys(mocks[n]),function(){for(const[k,v]of Object.entries(mocks[n]))this.setExport(k,v);},{context}));await mod.evaluate();
+ const path=require('node:path');
+ const cache=new Map();
+ const linker=async(n,parent)=>{
+  if(n==='@forge/events')return new vm.SyntheticModule(['Queue'],function(){this.setExport('Queue',class{async push(){}});},{context});
+  if(mocks[n])return new vm.SyntheticModule(Object.keys(mocks[n]),function(){for(const[k,v]of Object.entries(mocks[n]))this.setExport(k,v);},{context});
+  const base=parent.identifier==='vm:module(0)' ? (runtime?'src/runtime/issue-updated.js':'src/resolvers/index.js') : parent.identifier;
+  const filename=path.resolve(path.dirname(base),n+'.js');
+  if(cache.has(filename))return cache.get(filename);
+  const child=new vm.SourceTextModule(fs.readFileSync(filename,'utf8'),{context,identifier:filename});cache.set(filename,child);await child.link(linker);return child;
+ };
+ await mod.link(linker);await mod.evaluate();
  return {store,calls,state,h:mod.namespace.handler,run:mod.namespace.handleFilteredIssueUpdate};
 }
 const draft={id:'p',name:'Test',targetFieldId:'target',projectIds:['1'],behaviorType:'assessment',conditions:[{fieldId:'source',operator:'equals',value:'yes'}],resultValue:'A'};
@@ -34,7 +44,7 @@ test('relationship source spaces survive save and revision-bound validation', as
  const p = await h.h.savePolicy({payload:{...draft,behaviorType:'relationship',sourceProjectIds:['2','3','2'],linkTypeId:'9',relatedIssueTypeIds:['4'],sourceFieldId:'source',aggregation:'sum'}});
  assert.deepEqual(Array.from(p.sourceProjectIds), ['2','3']);
  await validate(h,p);
- await assert.rejects(h.h.reviewPolicyActivation({payload:{id:p.id}}), /awaits event handlers/);
+ await assert.rejects(h.h.reviewPolicyActivation({payload:{id:p.id}}), /numeric targets/);
  const reviewWrites=h.calls.filter(call=>call.options.method==='PUT');
  assert.equal(reviewWrites.length,0);
 });
@@ -68,4 +78,16 @@ test('diagnostic controls require admin and preserve policy revision',async()=>{
  const loaded=await h.h.getPolicyDiagnostics({payload:{id:p.id}});assert.equal(loaded.records.length,1);
  await h.h.clearPolicyDiagnostics({payload:{id:p.id}});
  assert.equal(h.store.has('diagnostic-run:v1:p:0'),false);assert.equal(h.store.get('diagnostics:v1:p').until,0);
+});
+
+test('numeric relationship activation projects both source and target and deactivation removes it',async()=>{
+ const h=await harness();h.state.numeric=true;
+ const p=await h.h.savePolicy({payload:{...draft,behaviorType:'relationship',sourceProjectIds:['2'],sourceFieldId:'source',linkTypeId:'7',relatedIssueTypeIds:['9'],aggregation:'sum'}});
+ await validate(h,p);
+ const review=await h.h.reviewPolicyActivation({payload:{id:p.id}});
+ await h.h.activatePolicy({payload:{id:p.id,...review}});
+ const indexes=h.calls.filter(call=>call.options.method==='PUT'&&call.url.includes('/properties/')).map(call=>JSON.parse(call.options.body));
+ assert.equal(indexes.length,2);assert.ok(indexes.every(item=>item.relationship));assert.ok(indexes.some(item=>item.linkRoutes.includes('7:1')));
+ await h.h.deactivatePolicy({payload:{id:p.id}});
+ assert.equal(h.calls.filter(call=>call.options.method==='DELETE').length,2);
 });

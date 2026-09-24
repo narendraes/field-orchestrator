@@ -1,3 +1,4 @@
+import { enqueueRelationshipEvent } from './relationship-worker';
 import api, { route } from '@forge/api';
 import { kvs } from '@forge/kvs';
 
@@ -35,11 +36,11 @@ async function retainRun(policy, event, outcome, startedAt, jiraRequests, messag
     kind: 'runtime',
     message: String(message || '').slice(0, 300)
   };
-  const [storedRuns, policies] = await Promise.all([kvs.get(RUNS_KEY), kvs.get(POLICIES_KEY)]);
-  await Promise.all([
-    kvs.set(RUNS_KEY, [run, ...(Array.isArray(storedRuns) ? storedRuns : [])].slice(0, RUN_LIMIT)),
-    kvs.set(POLICIES_KEY, (Array.isArray(policies) ? policies : []).map(item => item.id === policy.id ? { ...item, lastRunAt: createdAt, lastRunOutcome: outcome, lastRunTraceId: run.traceId } : item))
-  ]);
+  try {
+    const storedRuns = await kvs.get(RUNS_KEY);
+    await kvs.set(RUNS_KEY, [run, ...(Array.isArray(storedRuns) ? storedRuns : [])].slice(0, RUN_LIMIT));
+    await kvs.set(`policy-last-run:v1:${policy.id}`, { lastRunAt: createdAt, lastRunOutcome: outcome, lastRunTraceId: run.traceId });
+  } catch (_) { console.warn('Execution history unavailable.'); }
   console.info('Field Orchestrator runtime trace.', run);
 }
 
@@ -129,6 +130,13 @@ export async function handleFilteredIssueUpdate(event) {
   const changedFieldIds = new Set(event.changelog?.items?.map(item => item.fieldId).filter(Boolean) || []);
   const projectId = String(event.issue?.fields?.project?.id || event.issue?.project?.id || '');
   const stored = await kvs.get(POLICIES_KEY);
+  const relationshipPolicies = (Array.isArray(stored) ? stored : []).filter(policy => policy.status === 'active' && policy.behaviorType === 'relationship');
+  if (relationshipPolicies.some(policy => {
+    const plan = policy.runtime.plan;
+    const source = plan.sourceProjectIds.includes(projectId), target = plan.targetProjectIds.includes(projectId);
+    return event.eventType === 'avi:jira:created:issue' ? source || target :
+      (source && plan.sourceFieldIds.some(id => changedFieldIds.has(id))) || (target && plan.targetFieldIds.some(id => changedFieldIds.has(id)));
+  })) await enqueueRelationshipEvent(event);
   const policies = (Array.isArray(stored) ? stored : []).filter(policy =>
     policy.status === 'active'
     && policy.behaviorType === 'assessment'

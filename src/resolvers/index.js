@@ -1,4 +1,5 @@
 import Resolver from '@forge/resolver';
+import { projectDependencies, jiraAccess, calculateTarget, filterClause, TARGET_LIMIT } from '../runtime/relationship-worker';
 import { compileRelationshipPlan, traceRelationshipTargets } from '../runtime/relationship-routing';
 import { kvs } from '@forge/kvs';
 import api, { route } from '@forge/api';
@@ -231,12 +232,15 @@ resolver.define('traceRelationshipSource', async ({ payload }) => {
 });
 
 resolver.define('listPolicies', async () => {
-  return readPolicies();
+  const policies = await readPolicies();
+  return Promise.all(policies.map(async policy => { const latest = await kvs.get(`policy-last-run:v1:${policy.id}`); return latest?.lastRunAt > (policy.lastRunAt || '') ? { ...policy, ...latest } : policy; }));
 });
 
 resolver.define('listPolicyRuns', async () => {
   const value = await kvs.get(RUNS_KEY);
-  return Array.isArray(value) ? value : [];
+  const related = (await readPolicies()).filter(policy => policy.behaviorType === 'relationship' && policy.activatedAt);
+  const samples = await Promise.all(related.flatMap(policy => Array.from({ length: 20 }, (_, slot) => kvs.get(`relationship-run:v1:${policy.id}:${slot}`))));
+  return [...(Array.isArray(value) ? value : []), ...samples.filter(Boolean)].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 100);
 });
 
 resolver.define('savePolicy', async ({ payload }) => {
@@ -318,9 +322,8 @@ resolver.define('recordPolicyRun', async ({ payload }) => {
 });
 
 async function writeProjectIndex(projectId, policies) {
-  const active = policies.filter(policy => policy.status === 'active' && policy.projectIds.includes(String(projectId)));
-  const fieldIds = [...new Set(active.flatMap(policy => policy.runtime?.dependencyFieldIds || []))];
-  if (fieldIds.length === 0) {
+  const projection = projectDependencies(String(projectId), policies);
+  if (!projection.active) {
     const response = await api.asUser().requestJira(route`/rest/api/3/project/${projectId}/properties/${RUNTIME_PROPERTY}`, { method: 'DELETE' });
     if (!response.ok && response.status !== 404) throw new Error(`Removing the runtime index for project ${projectId} failed (${response.status}).`);
     return;
@@ -328,14 +331,13 @@ async function writeProjectIndex(projectId, policies) {
   await jiraJson(api.asUser().requestJira(route`/rest/api/3/project/${projectId}/properties/${RUNTIME_PROPERTY}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ active: true, fieldIds })
+    body: JSON.stringify(projection)
   }), `Updating the runtime index for project ${projectId}`);
 }
 
 async function prepareActivation(policy, policies) {
   if (!policy) throw new Error('The policy no longer exists.');
-  if (policy.behaviorType === 'relationship') throw new Error('Relationship activation awaits event handlers, safe writes and live acceptance. Read-only source routing is available; link-type filtering is supported by event.issueLinkType.id.');
-  if (policy.behaviorType !== 'assessment') throw new Error('The first runtime release activates field-assessment policies only.');
+  if (!['assessment', 'relationship'].includes(policy.behaviorType)) throw new Error('Hierarchy activation is not implemented.');
   if (!policy.revision || policy.lastValidatedRevision !== policy.revision || !policy.lastValidatedKey) throw new Error('Run a successful validation on a representative work item before activation.');
   const conflict = policies.find(item => item.id !== policy.id && item.status === 'active' && item.targetFieldId === policy.targetFieldId && item.projectIds.some(id => policy.projectIds.includes(id)));
   if (conflict) throw new Error(`“${conflict.name}” already owns this target field in an overlapping space.`);
@@ -343,11 +345,38 @@ async function prepareActivation(policy, policies) {
   const fields = await jiraJson(api.asUser().requestJira(route`/rest/api/3/field`, { headers: { Accept: 'application/json' } }), 'Loading Jira field metadata');
   const schemaById = new Map((Array.isArray(fields) ? fields : []).map(field => [field.id, field.schema || {}]));
   const targetSchema = schemaById.get(policy.targetFieldId) || {};
+  if (policy.behaviorType === 'relationship') {
+    const permission = await jiraJson(api.asUser().requestJira(route`/rest/api/3/mypermissions?permissions=ADMINISTER`), 'Administrator permission');
+    if (!permission.permissions?.ADMINISTER?.havePermission) throw new Error('Jira administrator permission required.');
+    if (!['sum', 'count', 'min', 'max'].includes(policy.aggregation) || targetSchema.type !== 'number') throw new Error('The relationship pilot supports numeric targets and sum/count/min/max only.');
+    if (policy.aggregation !== 'count' && schemaById.get(policy.sourceFieldId)?.type !== 'number') throw new Error('Choose a numeric source field.');
+    const plan = compileRelationshipPlan(policy);
+    (policy.filters || []).forEach(filterClause);
+    if (plan.sourceFieldIds.includes(policy.targetFieldId)) throw new Error('A relationship target cannot also be its source or filter field.');
+    const activeRelations = policies.filter(item => item.id !== policy.id && item.status === 'active' && item.behaviorType === 'relationship');
+    if (activeRelations.length >= 5) throw new Error('The private pilot supports at most five active relationship policies.');
+    for (const other of policies.filter(item => item.id !== policy.id && item.status === 'active')) {
+      const reads = other.runtime?.plan?.sourceFieldIds || other.runtime?.dependencyFieldIds || [];
+      if (reads.includes(policy.targetFieldId) || plan.sourceFieldIds.includes(other.targetFieldId)) throw new Error('Relationship chaining is not supported in this pilot. Deactivate the connected policy first.');
+    }
+    const activePolicy = { ...policy, status: 'active', activatedAt: new Date().toISOString(), runtime: { plan: { ...plan, activationReady: true }, dependencyFieldIds: [...plan.sourceFieldIds, ...plan.targetFieldIds], targetSchema } };
+    const jira = jiraAccess(true);
+    const targets = await jira.searchIssues(`project in (${plan.targetProjectIds.map(id => JSON.stringify(id)).join(',')})`, ['project'], TARGET_LIMIT);
+    if (!targets.some(item => item.key === policy.lastValidatedKey)) throw new Error('Validate a current work item in the selected target scope.');
+    // Verify every bounded target context, not just the representative option/context.
+    for (const target of targets) {
+      const metadata = await jira.editmeta(target.key);
+      if (metadata.fields?.[policy.targetFieldId]?.schema?.type !== 'number') throw new Error('Target field must be editable and numeric on every scoped target item.');
+    }
+    await calculateTarget(activePolicy, policy.lastValidatedKey, jira);
+    return { activePolicy, next: policies.map(item => item.id === policy.id ? activePolicy : item) };
+  }
   const unsupportedCondition = policy.conditions.find(condition => ['date', 'datetime'].includes(schemaById.get(condition.fieldId)?.type));
   if (unsupportedCondition) throw new Error('Date and date-time condition comparisons are not activation-ready yet.');
   const pieces = policy.conditions.map(condition => compileCondition(condition, schemaById.get(condition.fieldId) || {}));
   const expression = pieces.map(piece => `(${piece})`).join(policy.conditionMatch === 'OR' ? ' || ' : ' && ');
   const dependencyFieldIds = [...new Set([...policy.conditions.map(condition => condition.fieldId), ...(policy.protect ? [policy.targetFieldId] : [])])];
+  if (policies.some(item => item.status === 'active' && item.behaviorType === 'relationship' && (item.runtime.plan.sourceFieldIds.includes(policy.targetFieldId) || dependencyFieldIds.includes(item.targetFieldId)))) throw new Error('Assessment/relationship chaining is not supported in this pilot.');
   const compiledTargetValue = normalizedTargetValue(targetSchema, policy.lastValidatedValue);
   const activatedAt = new Date().toISOString();
   const activePolicy = { ...policy, status: 'active', activatedAt, runtime: { expression, dependencyFieldIds, targetSchema, compiledTargetValue } };
@@ -367,7 +396,7 @@ resolver.define('reviewPolicyActivation', async ({ payload }) => {
   return { ...review, dependencyFieldIds: activePolicy.runtime.dependencyFieldIds, projectIds: policy.projectIds, targetFieldId: policy.targetFieldId, protectionEnabled: policy.protect, createdIssuesIncluded: true, chainLimit: MAX_CHAIN_DEPTH,
     upstreamPolicies: policies.filter(item => item.status === 'active' && item.id !== policy.id && item.projectIds.some(id => policy.projectIds.includes(id)) && activePolicy.runtime.dependencyFieldIds.includes(item.targetFieldId)).map(item => item.name),
     downstreamPolicies: policies.filter(item => item.status === 'active' && item.id !== policy.id && item.projectIds.some(id => policy.projectIds.includes(id)) && item.runtime?.dependencyFieldIds.includes(policy.targetFieldId)).map(item => item.name),
-    updateJiraRequests: { noMatch: 1, matchNoChange: 2, changed: 3 } };
+    updateJiraRequests: policy.behaviorType === 'relationship' ? { maximumPerPolicyJob: 250 } : { noMatch: 1, matchNoChange: 2, changed: 3 } };
 });
 
 resolver.define('activatePolicy', async ({ payload }) => {
@@ -376,7 +405,7 @@ resolver.define('activatePolicy', async ({ payload }) => {
   const review = await kvs.get(`activation-review:v1:${payload.id}`);
   if (!policy || !review || review.reviewToken !== payload.reviewToken || review.policyRevision !== policy.revision || payload.policyRevision !== policy.revision || !Number.isFinite(review.expiresAt) || review.expiresAt <= Date.now()) throw new Error('Review the current revision again; activation review is missing or expired.');
   const { activePolicy, next } = await prepareActivation(policy, policies);
-  for (const projectId of policy.projectIds) await writeProjectIndex(projectId, next);
+  for (const projectId of [...new Set([...policy.projectIds, ...(policy.sourceProjectIds || [])])]) await writeProjectIndex(projectId, next);
   await kvs.set(POLICIES_KEY, next);
   await kvs.delete(`activation-review:v1:${policy.id}`);
   return activePolicy;
@@ -390,7 +419,7 @@ resolver.define('deactivatePolicy', async ({ payload }) => {
   const inactive = { ...policy, status: 'validated', deactivatedAt: new Date().toISOString() };
   delete inactive.runtime;
   const next = policies.map(item => item.id === policy.id ? inactive : item);
-  for (const projectId of policy.projectIds) await writeProjectIndex(projectId, next);
+  for (const projectId of [...new Set([...policy.projectIds, ...(policy.sourceProjectIds || [])])]) await writeProjectIndex(projectId, next);
   await kvs.set(POLICIES_KEY, next);
   return inactive;
 });

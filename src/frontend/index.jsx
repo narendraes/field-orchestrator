@@ -479,7 +479,7 @@ function App() {
           setPreview(current => current?.traceId === traceId ? { ...current, traceRetained: true } : current);
           const validated = { ...draft, lastValidatedRevision: result.error ? null : run.policyRevision, lastValidatedKey: result.error ? null : key };
           setDraft(current => current?.revision === run.policyRevision ? validated : current);
-          if (!result.error && draft.behaviorType === 'assessment') {
+          if (!result.error && ['assessment', 'relationship'].includes(draft.behaviorType)) {
             try {
               const review = await invoke('reviewPolicyActivation', { id: draft.id });
               setActivationReview(review);
@@ -591,7 +591,7 @@ function App() {
   return <Stack space="space.200">
     <Heading as="h1">Field Orchestrator</Heading>
     <Text>Define the desired state of a Jira or JPD field from conditions, hierarchy, or linked work.</Text>
-    <SectionMessage title="Private runtime pilot" appearance="information"><Text>Validated field-assessment policies can be activated. Active policies use manifest filtering and Jira expressions, suppress unchanged writes, and record changes or errors. Hierarchy and relationship policies remain read-only drafts.</Text></SectionMessage>
+    <SectionMessage title="Private runtime pilot" appearance="information"><Text>Validated field assessments and numeric relationship rollups can be activated. Active policies use manifest filtering and Jira expressions, suppress unchanged writes, and record changes or errors. Hierarchy policies remain read-only drafts.</Text></SectionMessage>
     {notice && <SectionMessage title="Saved" appearance="success"><Text>{notice}</Text></SectionMessage>}
     {loading && <Text>Loading Jira and JPD configuration…</Text>}
     {!loading && error && !draft && <SectionMessage title="Could not load configuration" appearance="error"><Text>{error}</Text><Button onClick={() => setAttempt(value => value + 1)}>Retry</Button></SectionMessage>}
@@ -657,7 +657,7 @@ function App() {
 
       {draft.behaviorType === 'relationship' && <Stack space="space.150">
         <Box><Label labelFor="source-spaces">Source spaces</Label><Select inputId="source-spaces" isMulti options={projects} value={projects.filter(item => (draft.sourceProjectIds || []).includes(item.value))} onChange={values => change({ sourceProjectIds: (values || []).map(item => item.value) })} /><HelperMessage>Select every space whose linked roots and descendants should contribute. Target spaces determine where the result belongs; source spaces determine which work is counted.</HelperMessage></Box>
-        <SectionMessage appearance="information" title="Read-only relationship testing"><Text>Automatic updates are still under development. You can preview the total or trace which targets a source story reaches.</Text></SectionMessage>
+        <SectionMessage appearance="information" title="Numeric relationship pilot"><Text>Numeric rollups can be activated after validation. Pilot limits: 10 target work items across the selected target spaces, five active relationship policies, no derived-field chaining. Structural events recalculate the bounded target scope; source updates trace affected targets.</Text></SectionMessage>
         <Label labelFor="routing-source">Source story or work item</Label><Textfield id="routing-source" value={routingKey} placeholder="ABC-123" onChange={event => { setRoutingKey(event.target.value); setRoutingResult(null); }} />
         <Button isDisabled={routingBusy || saving || previewing || !draft.id} onClick={async () => {
           setRoutingBusy(true); setRoutingResult(null); setError('');
@@ -728,7 +728,7 @@ function App() {
         </Stack>
       </Box>
       {draft.status === 'active' && <SectionMessage title="Active policy" appearance="success"><Text>Deactivate this policy before changing its configuration.</Text></SectionMessage>}
-      {activationReview && <SectionMessage title="Ready to activate" appearance="success"><Text>Dependencies: {activationReview.dependencyFieldIds.map(fieldName).join(', ')}. New work items are included. Estimated Jira requests per policy evaluation: 1–3.</Text><Text>Upstream policies: {activationReview.upstreamPolicies.join(', ') || 'None'}. Downstream policies: {activationReview.downstreamPolicies.join(', ') || 'None'}. Review expires after 15 minutes.</Text></SectionMessage>}
+      {activationReview && <SectionMessage title="Ready to activate" appearance="success"><Text>Dependencies: {activationReview.dependencyFieldIds.map(fieldName).join(', ')}. New work items are included. {draft.behaviorType === 'relationship' ? 'Relationship requests depend on hierarchy size and target count; processing uses a serialized queue.' : 'Estimated Jira requests per assessment evaluation: 1–3.'}</Text><Text>Upstream policies: {activationReview.upstreamPolicies.join(', ') || 'None'}. Downstream policies: {activationReview.downstreamPolicies.join(', ') || 'None'}. Review expires after 15 minutes.</Text></SectionMessage>}
       {error && <SectionMessage title="Check the policy" appearance="error"><Text>{error}</Text></SectionMessage>}
       <ButtonGroup>
         <Button isDisabled={saving || previewing || draft.status === 'active'} onClick={save}>Save draft</Button>
@@ -767,9 +767,9 @@ function App() {
         ] }))} rowsPerPage={10} emptyView={<Text>No diagnostic records captured. Enable diagnostics, change a dependency on an active policy, then refresh.</Text>} />
       </Stack>}
       {error && <SectionMessage appearance="error" title="Diagnostics"><Text>{error}</Text></SectionMessage>}
-<Text>Saved validation traces and automatic runtime changes, restorations, and errors appear here. Unchanged runtime outcomes are intentionally not stored.</Text><DynamicTable head={{ cells: ['Time', 'Policy', 'Work item', 'Outcome', 'Response', 'Jira requests', 'Trace ID'].map(item => ({ key: item, content: item })) }} rows={runs.map(run => ({ key: run.traceId, cells: [
-      { content: new Date(run.createdAt).toLocaleString() }, { content: run.policyName }, { content: run.workItemKey || '—' }, { content: run.outcome }, { content: `${(run.durationMs / 1000).toFixed(2)} s` }, { content: String(run.jiraRequests) }, { content: run.traceId }
-    ] }))} emptyView={<Text>No retained validation traces yet. Save a policy, open it, and run validation.</Text>} rowsPerPage={10} /><Text>History is bounded to the latest 50 traces. Search the Forge development logs for a Trace ID to correlate the backend record.</Text></Stack> : <Stack space="space.150"><Heading as="h2">Settings</Heading><Text>Private development app. Public distribution remains disabled.</Text><Text>Goal, OKR, and pull-request integrations are parked for a later release.</Text><Text>Free usage remains a design target; activation requires measured event volume and storage use.</Text></Stack>}
+<Text>Saved validation traces and automatic runtime changes, restorations, and errors appear here. Unchanged runtime outcomes are intentionally not stored.</Text><DynamicTable head={{ cells: ['Time', 'Policy', 'Work item', 'Outcome', 'Source / details', 'Response', 'Jira requests', 'Trace ID'].map(item => ({ key: item, content: item })) }} rows={runs.map(run => ({ key: run.traceId, cells: [
+      { content: new Date(run.createdAt).toLocaleString() }, { content: run.policyName }, { content: run.workItemKey || '—' }, { content: run.outcome }, { content: [run.sourceKey, run.message].filter(Boolean).join(' · ') || '—' }, { content: `${(run.durationMs / 1000).toFixed(2)} s` }, { content: String(run.jiraRequests) }, { content: run.traceId }
+    ] }))} emptyView={<Text>No retained validation traces yet. Save a policy, open it, and run validation.</Text>} rowsPerPage={10} /><Text>Shows up to 100 retained traces, including up to 20 sampled relationship results per policy. Search the Forge development logs for a Trace ID to correlate the backend record.</Text></Stack> : <Stack space="space.150"><Heading as="h2">Settings</Heading><Text>Private development app. Public distribution remains disabled.</Text><Text>Goal, OKR, and pull-request integrations are parked for a later release.</Text><Text>Free usage remains a design target; activation requires measured event volume and storage use.</Text></Stack>}
   </Stack>;
 }
 

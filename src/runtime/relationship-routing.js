@@ -12,7 +12,7 @@ export function compileRelationshipPlan(policy) {
   const sourceFieldIds = unique([
     ...(policy.aggregation === 'count' ? [] : [policy.sourceFieldId]),
     ...(policy.filters || []).map(filter => filter.fieldId === 'statusCategory' ? 'status' : filter.fieldId),
-    'parent', 'issuetype'
+    'parent', 'issuetype', 'project'
   ].filter(Boolean));
   return { policyId: policy.id, policyRevision: policy.revision,
     targetFieldId: policy.targetFieldId, linkTypeId: String(policy.linkTypeId),

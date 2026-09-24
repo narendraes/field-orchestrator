@@ -8,7 +8,7 @@ const issue=(key,parent,links=[])=>({key,fields:{project:{id:'2'},parent:parent?
 const link=(target,type='7',inward=false)=>({type:{id:type},[inward?'inwardIssue':'outwardIssue']:{key:target}});
 test('compile maps virtual status to status and indexes both link endpoints',async()=>{
  const {compileRelationshipPlan:compile}=await load();const plan=compile(policy);
- assert.deepEqual(Array.from(plan.sourceFieldIds),['customfield_1','status','parent','issuetype']);
+ assert.deepEqual(Array.from(plan.sourceFieldIds),['customfield_1','status','parent','issuetype','project']);
  assert.deepEqual(Array.from(plan.linkProjectIds),['2','1']);assert.equal(plan.activationReady,false);
  assert.throws(()=>compile({...policy,sourceProjectIds:[]}),/spaces/);
  assert.throws(()=>compile({...policy,hierarchyDepth:3}),/depth/);

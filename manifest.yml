@@ -28,11 +28,39 @@ modules:
             event.runtime.project.properties['field-orchestrator-runtime-v1'].fieldIds.includes(change.fieldId)
           )
         onError: IGNORE_AND_LOG
+    - key: relationship-links
+      function: relationship-ingress
+      events:
+        - avi:jira:created:issuelink
+        - avi:jira:deleted:issuelink
+      filter:
+        ignoreSelf: true
+        expression: |
+          event.runtime.project.properties['field-orchestrator-runtime-v1'].linkRoutes.includes(event.issueLinkType.id + ':' + event.destinationProjectId)
+        onError: IGNORE_AND_LOG
+    - key: relationship-deletion
+      function: relationship-ingress
+      events:
+        - avi:jira:deleted:issue
+      filter:
+        ignoreSelf: true
+        expression: |
+          event.runtime.project.properties['field-orchestrator-runtime-v1'].relationship == true
+        onError: IGNORE_AND_LOG
+  consumer:
+    - key: relationship-consumer
+      queue: relationship-jobs
+      function: relationship-worker
   function:
     - key: resolver
       handler: index.handler
     - key: runtime
       handler: index.handleFilteredIssueUpdate
+    - key: relationship-ingress
+      handler: index.enqueueRelationshipEvent
+    - key: relationship-worker
+      handler: index.runRelationshipJob
+      timeoutSeconds: 300
 resources:
   - key: main
     path: src/frontend/index.jsx
