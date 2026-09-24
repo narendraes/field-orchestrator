@@ -1,5 +1,10 @@
 # Jira delivery reconciliation
 
+## AutoUp branding — September 24, 2026
+
+Product name is now AutoUp. Jira admin navigation and in-app heading deployed privately in development version 5.8.0; Forge lint passed. Existing app ID, storage keys, module keys and repository identity are preserved. Atlassian-managed developer-console name and Jira app-user/history identity are separate from module titles and are not yet verified as renamed. User confirmed a live Story points change updated the JPD target (empty to 86). Next proposed feature: initial calculation on activation with progress, failure counts and retry, reusing paginated target jobs; not implemented by this branding change.
+
+
 ## Activation response parsing fix — September 24, 2026
 
 Deployed privately to development as 5.7.0. All 45 tests, ESLint and Forge lint pass. Project-property PUT responses are status-only commands and no longer parsed as JSON on success, including empty 200/201/204 responses. HTTP failures still block activation; data-reading endpoints still require valid JSON. This fixes the observed activation failure in writeProjectIndex after readiness review passed. An interrupted earlier activation may have written some project indexes, but did not commit active status; retrying activation overwrites the projections before saving active state. No permissions, filters, rule scope or automatic activation behavior changed. Regression coverage includes empty success responses and a rejected property write. Live activation acceptance remains pending.

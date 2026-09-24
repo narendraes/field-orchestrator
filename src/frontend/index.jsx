@@ -589,7 +589,7 @@ function App() {
   const filterFields = [{ value: 'statusCategory', name: 'Status category', custom: false, schema: { type: 'string' }, label: 'Status category · derived from Status' }, ...fields];
 
   return <Stack space="space.200">
-    <Heading as="h1">Field Orchestrator</Heading>
+    <Heading as="h1">AutoUp</Heading>
     <Text>Define the desired state of a Jira or JPD field from conditions, hierarchy, or linked work.</Text>
     <SectionMessage title="Private runtime pilot" appearance="information"><Text>Validated field assessments and numeric relationship rollups can be activated. Active policies use manifest filtering and Jira expressions, suppress unchanged writes, and record changes or errors. Hierarchy policies remain read-only drafts.</Text></SectionMessage>
     {notice && <SectionMessage title="Saved" appearance="success"><Text>{notice}</Text></SectionMessage>}

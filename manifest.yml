@@ -5,7 +5,7 @@ modules:
       resolver:
         function: resolver
       render: native
-      title: Field Orchestrator
+      title: AutoUp
   trigger:
     - key: field-orchestrator-filtered-issue-create
       function: runtime
