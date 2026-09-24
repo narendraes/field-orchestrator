@@ -113,6 +113,9 @@ function App() {
   const [issueTypes, setIssueTypes] = useState([]);
   const [policies, setPolicies] = useState([]);
   const [runs, setRuns] = useState([]);
+  const [routingKey, setRoutingKey] = useState('');
+  const [routingResult, setRoutingResult] = useState(null);
+  const [routingBusy, setRoutingBusy] = useState(false);
   const [diagnosticPolicyId, setDiagnosticPolicyId] = useState('');
   const [diagnostics, setDiagnostics] = useState(null);
   const [diagnosticBusy, setDiagnosticBusy] = useState(false);
@@ -150,7 +153,7 @@ function App() {
   const selectValue = (items, value) => items.find(item => item.value === value) || null;
   const change = patch => {
     if (saving || previewing || draft?.status === 'active') return;
-    setActivationReview(null); setPreview(null);
+    setActivationReview(null); setPreview(null); setRoutingResult(null);
     setDraft(current => ({ ...current, ...patch, lastValidatedRevision: null }));
   };
 
@@ -563,6 +566,7 @@ function App() {
   }
 
   function start(policy) {
+    setRoutingResult(null); setRoutingKey('');
     setActivationReview(null);
     setDraft(policy ? { ...policy, conditions: policy.conditions.map(item => ({ ...item })), filters: (policy.filters || []).map(item => ({ ...item })) } : blankPolicy());
     setError(''); setNotice(''); setTestKey(''); setPreview(null);
@@ -653,7 +657,20 @@ function App() {
 
       {draft.behaviorType === 'relationship' && <Stack space="space.150">
         <Box><Label labelFor="source-spaces">Source spaces</Label><Select inputId="source-spaces" isMulti options={projects} value={projects.filter(item => (draft.sourceProjectIds || []).includes(item.value))} onChange={values => change({ sourceProjectIds: (values || []).map(item => item.value) })} /><HelperMessage>Select every space whose linked roots and descendants should contribute. Target spaces determine where the result belongs; source spaces determine which work is counted.</HelperMessage></Box>
-        <SectionMessage appearance="warning" title="Live test available; activation blocked"><Text>Jira link events do not expose the relationship type needed for precise trigger filtering. Automatic relationship processing is unavailable until that trigger limitation is resolved.</Text></SectionMessage>
+        <SectionMessage appearance="information" title="Read-only relationship testing"><Text>Automatic updates are still under development. You can preview the total or trace which targets a source story reaches.</Text></SectionMessage>
+        <Label labelFor="routing-source">Source story or work item</Label><Textfield id="routing-source" value={routingKey} placeholder="ABC-123" onChange={event => { setRoutingKey(event.target.value); setRoutingResult(null); }} />
+        <Button isDisabled={routingBusy || saving || previewing || !draft.id} onClick={async () => {
+          setRoutingBusy(true); setRoutingResult(null); setError('');
+          try { setRoutingResult(await invoke('traceRelationshipSource', { id: draft.id, sourceKey: routingKey })); }
+          catch (exception) { setError(exception.message || 'Source routing failed.'); }
+          finally { setRoutingBusy(false); }
+        }}>Trace saved policy from source</Button>
+        <HelperMessage>Save changes first. This uses the saved revision and current links visible to you, without changing Jira.</HelperMessage>
+        {routingResult && <SectionMessage appearance="information" title="Affected target preview">
+          <Text>Source: {routingResult.sourceKey}. Saved revision: {routingResult.plan.policyRevision}. Ancestors checked: {routingResult.ancestors.map(item => item.key).join(', ')}.</Text>
+          <Text>Targets: {routingResult.targets.map(item => `${item.key} through ${item.roots.map(root => root.key).join(', ')}`).join('; ') || 'No visible targets matched the saved scope and relationship.'}</Text>
+          <Text>Source dependencies: {routingResult.plan.sourceFieldIds.join(', ')}. {routingResult.jiraRequests} Jira data requests; {routingResult.durationMs} ms. {routingResult.note}</Text>
+        </SectionMessage>}
         <SectionMessage appearance="discovery" title="How relationship rollups work"><Text>Find linked work of the selected type on either side of the relationship, optionally traverse its hierarchy, filter candidates, then calculate the target value.</Text></SectionMessage>
         <Inline grow="fill" shouldWrap space="space.200" rowSpace="space.150">
           <Box xcss={columnStyles}><Label labelFor="related-work-types">Related work type</Label><Select inputId="related-work-types" isMulti options={issueTypes} value={issueTypes.filter(item => (draft.relatedIssueTypeIds || []).includes(item.value))} onChange={values => change({ relatedIssueTypeIds: (values || []).map(item => item.value) })} /><HelperMessage>Only linked roots with these Jira work types start the traversal.</HelperMessage></Box>

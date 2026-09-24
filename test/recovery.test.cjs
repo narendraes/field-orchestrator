@@ -12,7 +12,7 @@ async function harness(runtime=false) {
  const context=vm.createContext({console:{info(){},error(){},warn(){}},crypto:{randomUUID}});
  const mocks={'@forge/api':{default:api,route},'@forge/kvs':{kvs},'@forge/resolver':{default:Resolver}};
  const mod=new vm.SourceTextModule(fs.readFileSync(runtime?'src/runtime/issue-updated.js':'src/resolvers/index.js','utf8'),{context});
- await mod.link(n=>new vm.SyntheticModule(Object.keys(mocks[n]),function(){for(const[k,v]of Object.entries(mocks[n]))this.setExport(k,v);},{context}));await mod.evaluate();
+ await mod.link(n=>n==='../runtime/relationship-routing' ? new vm.SourceTextModule(fs.readFileSync('src/runtime/relationship-routing.js','utf8'),{context}) : new vm.SyntheticModule(Object.keys(mocks[n]),function(){for(const[k,v]of Object.entries(mocks[n]))this.setExport(k,v);},{context}));await mod.evaluate();
  return {store,calls,state,h:mod.namespace.handler,run:mod.namespace.handleFilteredIssueUpdate};
 }
 const draft={id:'p',name:'Test',targetFieldId:'target',projectIds:['1'],behaviorType:'assessment',conditions:[{fieldId:'source',operator:'equals',value:'yes'}],resultValue:'A'};
@@ -34,7 +34,7 @@ test('relationship source spaces survive save and revision-bound validation', as
  const p = await h.h.savePolicy({payload:{...draft,behaviorType:'relationship',sourceProjectIds:['2','3','2'],linkTypeId:'9',relatedIssueTypeIds:['4'],sourceFieldId:'source',aggregation:'sum'}});
  assert.deepEqual(Array.from(p.sourceProjectIds), ['2','3']);
  await validate(h,p);
- await assert.rejects(h.h.reviewPolicyActivation({payload:{id:p.id}}), /link-type ID/);
+ await assert.rejects(h.h.reviewPolicyActivation({payload:{id:p.id}}), /awaits event handlers/);
  const reviewWrites=h.calls.filter(call=>call.options.method==='PUT');
  assert.equal(reviewWrites.length,0);
 });

@@ -1,4 +1,5 @@
 import Resolver from '@forge/resolver';
+import { compileRelationshipPlan, traceRelationshipTargets } from '../runtime/relationship-routing';
 import { kvs } from '@forge/kvs';
 import api, { route } from '@forge/api';
 
@@ -204,6 +205,31 @@ resolver.define('clearPolicyDiagnostics', async ({ payload }) => {
   return { until: 0, records: [] };
 });
 
+resolver.define('traceRelationshipSource', async ({ payload }) => {
+  const policy = await diagnosticPolicy(payload);
+  const key = text(payload?.sourceKey, 80).toUpperCase();
+  if (!/^[A-Z][A-Z0-9_]*-[1-9][0-9]*$/.test(key)) throw new Error('Enter a source work-item key such as ABC-123.');
+  const plan = compileRelationshipPlan(policy);
+  let jiraRequests = 0;
+  const startedAt = Date.now();
+  const readIssue = async (issueKey, fields) => {
+    jiraRequests += 1;
+    return jiraJson(api.asUser().requestJira(route`/rest/api/3/issue/${issueKey}?fields=${fields.join(',')}`, { headers: { Accept: 'application/json' } }), 'Reading source hierarchy');
+  };
+  const searchIssues = async (jql, fields, limit) => {
+    jiraRequests += 1;
+    const result = await jiraJson(api.asUser().requestJira(route`/rest/api/3/search/jql`, {
+      method: 'POST', headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jql, fields, maxResults: limit + 1 })
+    }), 'Finding affected targets');
+    if (result.nextPageToken || result.isLast === false || (result.issues || []).length > limit) throw new Error('Routing search is incomplete; narrow the policy.');
+    return result.issues || [];
+  };
+  const result = await traceRelationshipTargets(plan, key, { readIssue, searchIssues });
+  return { ...result, plan, sourceKey: key, jiraRequests, durationMs: Date.now() - startedAt,
+    note: 'Read-only routing from current visible Jira links. This does not activate the policy, write a field, or prove deleted-link or old-parent coverage.' };
+});
+
 resolver.define('listPolicies', async () => {
   return readPolicies();
 });
@@ -308,7 +334,7 @@ async function writeProjectIndex(projectId, policies) {
 
 async function prepareActivation(policy, policies) {
   if (!policy) throw new Error('The policy no longer exists.');
-  if (policy.behaviorType === 'relationship') throw new Error('Relationship activation is blocked: documented Jira link events do not expose the link-type ID required by this app’s manifest filter. Source scope and live validation are available.');
+  if (policy.behaviorType === 'relationship') throw new Error('Relationship activation awaits event handlers, safe writes and live acceptance. Read-only source routing is available; link-type filtering is supported by event.issueLinkType.id.');
   if (policy.behaviorType !== 'assessment') throw new Error('The first runtime release activates field-assessment policies only.');
   if (!policy.revision || policy.lastValidatedRevision !== policy.revision || !policy.lastValidatedKey) throw new Error('Run a successful validation on a representative work item before activation.');
   const conflict = policies.find(item => item.id !== policy.id && item.status === 'active' && item.targetFieldId === policy.targetFieldId && item.projectIds.some(id => policy.projectIds.includes(id)));
