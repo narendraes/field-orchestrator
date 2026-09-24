@@ -113,6 +113,9 @@ function App() {
   const [issueTypes, setIssueTypes] = useState([]);
   const [policies, setPolicies] = useState([]);
   const [runs, setRuns] = useState([]);
+  const [diagnosticPolicyId, setDiagnosticPolicyId] = useState('');
+  const [diagnostics, setDiagnostics] = useState(null);
+  const [diagnosticBusy, setDiagnosticBusy] = useState(false);
   const [activationReview, setActivationReview] = useState(null);
   const [draft, setDraft] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -129,6 +132,17 @@ function App() {
   const [projectTypeFilter, setProjectTypeFilter] = useState('all');
   const [projectCategoryFilter, setProjectCategoryFilter] = useState('all');
   const [attempt, setAttempt] = useState(0);
+
+  async function loadDiagnostics(id, action) {
+    setDiagnosticBusy(true); setError('');
+    try {
+      if (action === 'enable' || action === 'disable') await invoke('setPolicyDiagnostics', { id, enabled: action === 'enable' });
+      if (action === 'clear') await invoke('clearPolicyDiagnostics', { id });
+      const result = await invoke('getPolicyDiagnostics', { id });
+      setDiagnosticPolicyId(id); setDiagnostics(result);
+    } catch (exception) { setError(exception.message || 'Could not load diagnostics.'); }
+    finally { setDiagnosticBusy(false); }
+  }
 
   const field = id => fields.find(item => item.value === id);
   const fieldName = id => id === 'statusCategory' ? 'Status category' : field(id)?.name || id || '[field]';
@@ -719,12 +733,24 @@ function App() {
         { content: policy.name }, { content: fieldName(policy.targetFieldId) }, { content: behaviorOptions.find(item => item.value === policy.behaviorType)?.label || policy.behaviorType },
         { content: String(policy.projectIds.length) }, { content: policy.protect ? 'Restore' : 'Off' }, { content: <Lozenge appearance={policy.status === 'active' ? 'success' : hasCurrentValidation(policy) ? 'inprogress' : 'default'}>{policy.status === 'active' ? 'Active' : hasCurrentValidation(policy) ? 'Validated' : 'Draft'}</Lozenge> },
         { content: policy.lastRunAt ? new Date(policy.lastRunAt).toLocaleString() : 'Never' },
-        { content: new Date(policy.updatedAt).toLocaleString() }, { content: <ButtonGroup><Button onClick={() => start(policy)}>{policy.status === 'active' ? 'Open' : 'Edit'}</Button><Button appearance="danger" isDisabled={policy.status === 'active'} onClick={() => { setDeleteCandidate(policy); setError(''); }}>Delete</Button></ButtonGroup> }
+        { content: new Date(policy.updatedAt).toLocaleString() }, { content: <ButtonGroup><Button isDisabled={diagnosticBusy} onClick={() => { setPage('Executions'); loadDiagnostics(policy.id); }}>Diagnostics</Button><Button onClick={() => start(policy)}>{policy.status === 'active' ? 'Open' : 'Edit'}</Button><Button appearance="danger" isDisabled={policy.status === 'active'} onClick={() => { setDeleteCandidate(policy); setError(''); }}>Delete</Button></ButtonGroup> }
 
       ] }))} emptyView={<Text>No saved policies match this view.</Text>} rowsPerPage={10} />
       {deleteCandidate && <SectionMessage title="Delete this policy?" appearance="warning"><Text>“{deleteCandidate.name}” will be permanently removed from this private app installation.</Text><ButtonGroup><Button appearance="danger" isDisabled={saving} onClick={removePolicy}>{saving ? 'Deleting…' : 'Confirm delete'}</Button><Button onClick={() => setDeleteCandidate(null)}>Cancel</Button></ButtonGroup></SectionMessage>}
       {error && <SectionMessage title="Policy action failed" appearance="error"><Text>{error}</Text></SectionMessage>}
-    </Stack> : page === 'Executions' ? <Stack space="space.150"><Heading as="h2">Executions</Heading><Text>Saved validation traces and automatic runtime changes, restorations, and errors appear here. Unchanged runtime outcomes are intentionally not stored.</Text><DynamicTable head={{ cells: ['Time', 'Policy', 'Work item', 'Outcome', 'Response', 'Jira requests', 'Trace ID'].map(item => ({ key: item, content: item })) }} rows={runs.map(run => ({ key: run.traceId, cells: [
+    </Stack> : page === 'Executions' ? <Stack space="space.150"><Heading as="h2">Executions</Heading>
+      <Heading as="h3">Temporary policy diagnostics</Heading>
+      <Select aria-label="Diagnostic policy" isDisabled={diagnosticBusy} options={policies.map(policy => choice(policy.name, policy.id))} value={policies.filter(policy => policy.id === diagnosticPolicyId).map(policy => choice(policy.name, policy.id))[0] || null} onChange={option => option && loadDiagnostics(option.value)} />
+      {diagnostics && <Stack space="space.100">
+        <Text>Policy: {diagnostics.status}. Type: {diagnostics.behaviorType}. Diagnostics {diagnostics.until > Date.now() ? `enabled until ${new Date(diagnostics.until).toLocaleString()}` : 'off'}.</Text>
+        <ButtonGroup><Button isDisabled={diagnosticBusy} onClick={() => loadDiagnostics(diagnosticPolicyId, 'enable')}>Enable for 24 hours</Button><Button isDisabled={diagnosticBusy} onClick={() => loadDiagnostics(diagnosticPolicyId, 'disable')}>Turn off</Button><Button isDisabled={diagnosticBusy} onClick={() => loadDiagnostics(diagnosticPolicyId)}>Refresh</Button><Button isDisabled={diagnosticBusy} onClick={() => loadDiagnostics(diagnosticPolicyId, 'clear')}>Turn off and clear</Button></ButtonGroup>
+        <Text>Up to 20 sampled records per policy. Shows admitted runtime events only; manifest-rejected events are invisible. Inactive and unsupported policy types have no automatic processing. Enabling diagnostics adds storage and log usage; field values and full event payloads are not recorded.</Text>
+        <DynamicTable head={{ cells: ['Time', 'Work item', 'Event', 'Outcome', 'Changed fields', 'Revision', 'Time / requests', 'Trace'].map(label => ({ key: label, content: label })) }} rows={diagnostics.records.map(record => ({ key: record.traceId, cells: [
+          { content: new Date(record.createdAt).toLocaleString() }, { content: record.workItemKey }, { content: record.eventType }, { content: record.outcome }, { content: record.changedFieldIds.join(', ') || 'None / creation' }, { content: record.revision || 'Legacy' }, { content: `${record.durationMs} ms / ${record.jiraRequests}` }, { content: record.traceId }
+        ] }))} rowsPerPage={10} emptyView={<Text>No diagnostic records captured. Enable diagnostics, change a dependency on an active policy, then refresh.</Text>} />
+      </Stack>}
+      {error && <SectionMessage appearance="error" title="Diagnostics"><Text>{error}</Text></SectionMessage>}
+<Text>Saved validation traces and automatic runtime changes, restorations, and errors appear here. Unchanged runtime outcomes are intentionally not stored.</Text><DynamicTable head={{ cells: ['Time', 'Policy', 'Work item', 'Outcome', 'Response', 'Jira requests', 'Trace ID'].map(item => ({ key: item, content: item })) }} rows={runs.map(run => ({ key: run.traceId, cells: [
       { content: new Date(run.createdAt).toLocaleString() }, { content: run.policyName }, { content: run.workItemKey || '—' }, { content: run.outcome }, { content: `${(run.durationMs / 1000).toFixed(2)} s` }, { content: String(run.jiraRequests) }, { content: run.traceId }
     ] }))} emptyView={<Text>No retained validation traces yet. Save a policy, open it, and run validation.</Text>} rowsPerPage={10} /><Text>History is bounded to the latest 50 traces. Search the Forge development logs for a Trace ID to correlate the backend record.</Text></Stack> : <Stack space="space.150"><Heading as="h2">Settings</Heading><Text>Private development app. Public distribution remains disabled.</Text><Text>Goal, OKR, and pull-request integrations are parked for a later release.</Text><Text>Free usage remains a design target; activation requires measured event volume and storage use.</Text></Stack>}
   </Stack>;

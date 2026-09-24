@@ -4,12 +4,12 @@ const fs=require('node:fs');
 const vm=require('node:vm');
 const {randomUUID}=require('node:crypto');
 async function harness(runtime=false) {
- const store=new Map(), calls=[]; const state={target:'old',matches:true};
- const kvs={get:async k=>structuredClone(store.get(k)),set:async(k,v)=>store.set(k,structuredClone(v)),delete:async k=>store.delete(k)};
+ const store=new Map(), calls=[]; const state={target:'old',matches:true,admin:true,failDiagnostic:false};
+ const kvs={get:async k=>structuredClone(store.get(k)),set:async(k,v)=>{if(state.failDiagnostic && k.startsWith('diagnostic-run:'))throw new Error('storage unavailable');store.set(k,structuredClone(v));},delete:async k=>store.delete(k)};
  class Resolver {constructor(){this.h={};} define(n,f){this.h[n]=f;} getDefinitions(){return this.h;}}
- const requestJira=async(url,options={})=>{calls.push({url,options});let data={};if(url.endsWith('/field'))data=['source','target'].map(id=>({id,schema:{type:'string'}}));else if(url.includes('/expression/'))data={value:state.matches};else if(options.method==='PUT'&&url.includes('/issue/'))state.target=JSON.parse(options.body).fields.target;else if(url.includes('/issue/'))data={fields:{target:state.target}};return {ok:true,status:200,json:async()=>data};};
+ const requestJira=async(url,options={})=>{calls.push({url,options});let data={};if(url.includes('/mypermissions'))data={permissions:{ADMINISTER:{havePermission:state.admin}}};else if(url.endsWith('/field'))data=['source','target'].map(id=>({id,schema:{type:'string'}}));else if(url.includes('/expression/'))data={value:state.matches};else if(options.method==='PUT'&&url.includes('/issue/'))state.target=JSON.parse(options.body).fields.target;else if(url.includes('/issue/'))data={fields:{target:state.target}};return {ok:true,status:200,json:async()=>data};};
  const api={asUser:()=>({requestJira}),asApp:()=>({requestJira})}; const route=(s,...v)=>s.reduce((a,x,i)=>a+x+(v[i]??''),'');
- const context=vm.createContext({console:{info(){},error(){}},crypto:{randomUUID}});
+ const context=vm.createContext({console:{info(){},error(){},warn(){}},crypto:{randomUUID}});
  const mocks={'@forge/api':{default:api,route},'@forge/kvs':{kvs},'@forge/resolver':{default:Resolver}};
  const mod=new vm.SourceTextModule(fs.readFileSync(runtime?'src/runtime/issue-updated.js':'src/resolvers/index.js','utf8'),{context});
  await mod.link(n=>new vm.SyntheticModule(Object.keys(mocks[n]),function(){for(const[k,v]of Object.entries(mocks[n]))this.setExport(k,v);},{context}));await mod.evaluate();
@@ -37,4 +37,35 @@ test('relationship source spaces survive save and revision-bound validation', as
  await assert.rejects(h.h.reviewPolicyActivation({payload:{id:p.id}}), /link-type ID/);
  const reviewWrites=h.calls.filter(call=>call.options.method==='PUT');
  assert.equal(reviewWrites.length,0);
+});
+
+for (const outcome of ['no-match','unchanged','write-succeeded']) test('diagnostics captures '+outcome, async () => {
+ const h=await harness(true);
+ h.store.set('diagnostics:v1:p',{until:Date.now()+60000});
+ h.store.set('field-policies:v1',[{...draft,revision:'r1',status:'active',runtime:{expression:'true',dependencyFieldIds:['source'],compiledTargetValue:'A'}}]);
+ if(outcome==='no-match')h.state.matches=false;
+ if(outcome==='unchanged')h.state.target='A';
+ await h.run({issue:{key:'ABC-1',fields:{project:{id:'1'}}},changelog:{items:[{fieldId:'source'}]}});
+ const records=[...h.store.entries()].filter(([key])=>key.startsWith('diagnostic-run:')).map(([,value])=>value);
+ assert.equal(records.length,1); assert.equal(records[0].outcome,outcome); assert.equal(records[0].revision,'r1');
+ assert.equal('fields' in records[0],false);
+});
+test('expired diagnostics stores no records and telemetry failure cannot fail a write',async()=>{
+ const h=await harness(true);
+ h.store.set('field-policies:v1',[{...draft,status:'active',runtime:{expression:'true',dependencyFieldIds:['source'],compiledTargetValue:'A'}}]);
+ const event={issue:{key:'ABC-1',fields:{project:{id:'1'}}},changelog:{items:[{fieldId:'source'}]}};
+ h.store.set('diagnostics:v1:p',{until:1});await h.run(event);
+ assert.equal([...h.store.keys()].some(key=>key.startsWith('diagnostic-run:')),false);
+ h.state.target='old';h.state.failDiagnostic=true;h.store.set('diagnostics:v1:p',{until:Date.now()+60000});
+ await h.run(event);assert.equal(h.state.target,'A');assert.equal(h.store.get('policy-runs:v1')[0].outcome,'changed');
+});
+test('diagnostic controls require admin and preserve policy revision',async()=>{
+ const {h,p}=await ready();h.state.admin=false;
+ await assert.rejects(h.h.setPolicyDiagnostics({payload:{id:p.id,enabled:true}}),/administrator/);
+ h.state.admin=true;const setting=await h.h.setPolicyDiagnostics({payload:{id:p.id,enabled:true}});
+ assert.ok(setting.until>Date.now());assert.equal(h.store.get('field-policies:v1')[0].revision,p.revision);
+ h.store.set('diagnostic-run:v1:p:0',{traceId:'t',createdAt:new Date().toISOString()});
+ const loaded=await h.h.getPolicyDiagnostics({payload:{id:p.id}});assert.equal(loaded.records.length,1);
+ await h.h.clearPolicyDiagnostics({payload:{id:p.id}});
+ assert.equal(h.store.has('diagnostic-run:v1:p:0'),false);assert.equal(h.store.get('diagnostics:v1:p').until,0);
 });

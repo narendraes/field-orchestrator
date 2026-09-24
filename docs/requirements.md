@@ -241,3 +241,15 @@ Implemented locally; not deployed:
 - Automatic rollups require a revised, explicitly accepted trigger contract (for example source-project/pair filtering with relationship resolution after invocation), or a platform-supported link-type projection. Creation/deletion, old/new parent effects, permission/context checks, concurrent target writes and recovery must also pass acceptance tests before enabling writes.
 
 References: [Jira link events](https://developer.atlassian.com/platform/forge/events-reference/jira/#issue-link-events), [entity-property event filtering](https://developer.atlassian.com/platform/forge/events-reference/product_events/#filtering-by-entity-properties).
+
+## Temporary per-policy telemetry — September 24, 2026
+
+Implemented locally, pending deployment and live acceptance:
+- Policies have a Diagnostics action opening a policy selector in Executions. A Jira administrator can enable capture for 24 hours, turn it off, refresh, or turn it off and clear. Enabling does not change the policy revision or activate a draft. Default is off.
+- Captures no-match, unchanged, successful write, evaluation error, unrelated dependency, and invalid dependency graph outcomes for runtime events that reached the handler. Draft/unsupported configurations have no runtime processing; their existing manual validation traces remain available.
+- Captures policy revision, event type, work-item key, changed field IDs, duration, Jira request count and correlation trace. No field values or full event bodies are included in diagnostic records.
+- Uses separate per-policy settings and 20 randomly selected fixed record slots per policy. This is a bounded sample, not the last 20 guaranteed events or an exhaustive audit. Concurrent records can replace a slot, but diagnostics never rewrite policy configuration. Existing execution history remains separate.
+- Capture expires after 24 hours; stored records persist until cleared or overwritten. Clearing disables capture and deletes all slots; an already-running capture can still finish. Deleting a policy does not yet purge diagnostic keys.
+- Each scoped active policy checked by an admitted invocation adds one settings KVS read, even with diagnostics off. Enabled outcomes add one record write and one concise Forge log. Viewing records reads up to 20 slots. No new Jira product subscriptions or diagnostic Jira reads are added to runtime processing.
+- Diagnostic persistence failures are swallowed and cannot turn a successful calculation/write into a runtime failure. Handler crashes before recording are visible only in platform logs. Manifest-rejected and ignoreSelf-rejected events cannot be observed by the function; absence of a record is not proof an event never occurred.
+- Relationship-trigger architecture remains unresolved; this telemetry change does not authorize a broader link subscription or enable relationship writes.

@@ -174,6 +174,36 @@ async function readPolicies() {
   return Array.isArray(value) ? value : [];
 }
 
+async function diagnosticPolicy(payload) {
+  const permission = await jiraJson(api.asUser().requestJira(route`/rest/api/3/mypermissions?permissions=ADMINISTER`, { headers: { Accept: 'application/json' } }), 'Checking administrator permission');
+  if (!permission?.permissions?.ADMINISTER?.havePermission) throw new Error('Jira administrator permission is required for diagnostics.');
+  const policy = (await readPolicies()).find(item => item.id === payload?.id);
+  if (!policy) throw new Error('Policy not found.');
+  return policy;
+}
+
+resolver.define('setPolicyDiagnostics', async ({ payload }) => {
+  const policy = await diagnosticPolicy(payload);
+  const setting = { until: payload.enabled === true ? Date.now() + 24 * 60 * 60 * 1000 : 0 };
+  await kvs.set(`diagnostics:v1:${policy.id}`, setting);
+  return setting;
+});
+
+resolver.define('getPolicyDiagnostics', async ({ payload }) => {
+  const policy = await diagnosticPolicy(payload);
+  const setting = await kvs.get(`diagnostics:v1:${policy.id}`);
+  const records = await Promise.all(Array.from({ length: 20 }, (_, slot) => kvs.get(`diagnostic-run:v1:${policy.id}:${slot}`)));
+  return { until: setting?.until || 0, status: policy.status, behaviorType: policy.behaviorType,
+    records: records.filter(Boolean).sort((a, b) => b.createdAt.localeCompare(a.createdAt)) };
+});
+
+resolver.define('clearPolicyDiagnostics', async ({ payload }) => {
+  const policy = await diagnosticPolicy(payload);
+  await kvs.set(`diagnostics:v1:${policy.id}`, { until: 0 });
+  await Promise.all(Array.from({ length: 20 }, (_, slot) => kvs.delete(`diagnostic-run:v1:${policy.id}:${slot}`)));
+  return { until: 0, records: [] };
+});
+
 resolver.define('listPolicies', async () => {
   return readPolicies();
 });

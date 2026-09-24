@@ -43,6 +43,27 @@ async function retainRun(policy, event, outcome, startedAt, jiraRequests, messag
   console.info('Field Orchestrator runtime trace.', run);
 }
 
+// Diagnostics are optional and must never change the result of a Jira write.
+// Fixed slots bound storage without rewriting policy configuration or a shared history array.
+async function diagnostic(policy, event, outcome, startedAt, jiraRequests) {
+  try {
+    const setting = await kvs.get(`diagnostics:v1:${policy.id}`);
+    if (!setting || setting.until <= Date.now()) return;
+    const traceId = `fo-debug-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    const slot = Math.floor(Math.random() * 20);
+    const record = { traceId, policyId: policy.id, revision: policy.revision || '',
+      createdAt: new Date().toISOString(), workItemKey: event.issue?.key || '',
+      eventType: event.eventType || 'avi:jira:updated:issue', outcome,
+      durationMs: Date.now() - startedAt, jiraRequests,
+      changedFieldIds: [...new Set((event.changelog?.items || []).map(item => item.fieldId).filter(Boolean))].slice(0, 30) };
+    await kvs.set(`diagnostic-run:v1:${policy.id}:${slot}`, record);
+    console.info('Field Orchestrator diagnostic.', record);
+  } catch (_) {
+    // Telemetry outages must not suppress downstream derived-field processing.
+    console.warn('Field Orchestrator diagnostic unavailable.');
+  }
+}
+
 async function processPolicy(policy, event) {
   const startedAt = Date.now();
   let jiraRequests = 0;
@@ -53,13 +74,13 @@ async function processPolicy(policy, event) {
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify({ expression: policy.runtime.expression, context: { issue: { key: event.issue.key } } })
     }), 'Jira expression evaluation');
-    if (evaluation?.value !== true) return false;
+    if (evaluation?.value !== true) { await diagnostic(policy, event, 'no-match', startedAt, jiraRequests); return false; }
 
     jiraRequests += 1;
     const issue = await jiraJson(api.asApp().requestJira(route`/rest/api/3/issue/${event.issue.key}?fields=${policy.targetFieldId}`, { headers: { Accept: 'application/json' } }), 'Target value read');
     const currentValue = issue?.fields?.[policy.targetFieldId];
     const nextValue = policy.runtime.compiledTargetValue;
-    if (displayValue(currentValue) === displayValue(nextValue)) return false;
+    if (displayValue(currentValue) === displayValue(nextValue)) { await diagnostic(policy, event, 'unchanged', startedAt, jiraRequests); return false; }
 
     jiraRequests += 1;
     await jiraJson(api.asApp().requestJira(route`/rest/api/3/issue/${event.issue.key}`, {
@@ -67,9 +88,11 @@ async function processPolicy(policy, event) {
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify({ fields: { [policy.targetFieldId]: nextValue } })
     }), 'Target field update');
+    await diagnostic(policy, event, 'write-succeeded', startedAt, jiraRequests);
     await retainRun(policy, event, policy.protect && event.changelog?.items?.some(item => item.fieldId === policy.targetFieldId) ? 'restored' : 'changed', startedAt, jiraRequests, `${policy.targetFieldId} updated after Jira expression matched.`);
     return true;
   } catch (error) {
+    await diagnostic(policy, event, 'evaluation-error', startedAt, jiraRequests);
     await retainRun(policy, event, 'error', startedAt, jiraRequests, error.message);
     return false;
   }
@@ -116,10 +139,14 @@ export async function handleFilteredIssueUpdate(event) {
   }
   try {
     for (const policy of topologicalPolicies(policies)) {
-      if (!policy.runtime?.dependencyFieldIds?.some(fieldId => changedFieldIds.has(fieldId))) continue;
+      if (!policy.runtime?.dependencyFieldIds?.some(fieldId => changedFieldIds.has(fieldId))) {
+        await diagnostic(policy, event, 'unrelated-dependency', Date.now(), 0);
+        continue;
+      }
       if (await processPolicy(policy, event)) changedFieldIds.add(policy.targetFieldId);
     }
   } catch (error) {
+    for (const policy of policies) await diagnostic(policy, event, 'dependency-graph-error', Date.now(), 0);
     console.error('Field Orchestrator rejected an invalid runtime dependency graph.', { projectId, message: error.message });
   }
 }
