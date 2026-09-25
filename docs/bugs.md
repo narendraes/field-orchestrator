@@ -39,3 +39,5 @@ Copy this section and allocate the next unused BUG-NNN ID.
 Removed relationship queue delays and the extra queue hop for each policy's first target on ordinary updates. Fan-out and structural scans remain queued; concurrency remains one. Added ingress-to-result and pre-job timing for measurement. Regression verification and private deployment recorded separately; live latency acceptance remains pending.
 
 BUG-001 status: deployed for live verification in private development 5.10.0. All 61 tests, ESLint and Forge lint passed. No measured post-deployment speed claim yet.
+
+Live acceptance (2026-09-25, development 5.10.0): a five-point Story moved to In Progress. Screenshot confirms In Progress 10→15 and To Do 81→76 on the same target. Logs confirm both status-triggered writes in one worker invocation, 2.704 seconds apart (previous observed gap 25.468 seconds). Completion from Forge ingress was 5.978 and 8.681 seconds; pre-job time 2.058 seconds. This is one successful sample, not a throughput guarantee or Jira-edit-to-write measurement. Post-change protection and load tests remain pending.
