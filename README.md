@@ -1,36 +1,35 @@
-# Forge Hello World
+# AutoUp
 
-This project contains a Forge app written in Javascript that displays `Hello World!` in a Jira admin page. 
+A private Forge app for no-code Jira/JPD field assessments, linked-work numeric rollups, target protection and optional initial population.
 
-See [developer.atlassian.com/platform/forge/](https://developer.atlassian.com/platform/forge) for documentation and tutorials explaining Forge.
+## Start here
 
-## Requirements
+- [Product requirements](docs/requirements.md): current behavior, limits, pending features and acceptance scenarios.
+- [Standalone feature and rebuild plan](plan.md): independent task IDs, implemented work, remaining tasks, dependencies and rebuild sequence.
+- [Runtime architecture](docs/runtime-architecture.md): manifest gates, modules, schemas, storage, queues and recovery contracts.
+- [Historical notes](docs/history/): superseded requirements/architecture retained for context, not current specifications.
 
-See [Set up Forge](https://developer.atlassian.com/platform/forge/set-up-forge/) for instructions to get set up.
+Current application baseline: private development **5.9.0**, source **5f872dd**. Automatic numeric rollups have user-confirmed live evidence for one Story-to-JPD update. Optional population and Done protection are implemented; their live acceptance remains pending. Hierarchy inheritance is preview-only; ordered decisions and external integrations remain pending/deferred as specified.
 
-## Quick start
+## Work locally
 
-- Modify your app frontend by editing the `src/frontend/index.jsx` file.
+Read `AGENTS.md`. Use the repository lockfile and a currently supported Node/Forge CLI setup. From the app root:
 
-- Modify your app backend by editing the `src/resolvers/index.js` file to define resolver functions. See [Forge resolvers](https://developer.atlassian.com/platform/forge/runtime-reference/custom-ui-resolver/) for documentation on resolver functions.
-
-- Build and deploy your app by running:
-```
-forge deploy
-```
-
-- Install your app in an Atlassian site by running:
-```
-forge install
+```sh
+npm ci
+npm test
+npm run lint
+forge lint
 ```
 
-- Develop your app by running `forge tunnel` to proxy invocations locally:
-```
-forge tunnel
-```
+The baseline suite contains 58 automated tests. UI uses native Forge UI Kit. Runtime code lives under `src/runtime/`, admin resolvers under `src/resolvers/`, and the editor in `src/frontend/index.jsx`.
 
-### Notes
-- Use the `forge deploy` command when you want to persist code changes.
-- Use the `forge install` command when you want to install the app on a new site.
-- Once the app is installed on a site, the site picks up the new app changes you deploy without needing to rerun the install command.
+## Deploy and recover
 
+Deploy to the intended private development environment only after checks pass. Preserve the existing Forge app identity and storage namespaces when recovering this installation. A deliberately new app/site requires explicit identity/configuration setup. Follow the detailed steps and acceptance gates in [plan.md](plan.md); do not recreate the app merely to rename it.
+
+Deployment does not automatically activate drafts or populate existing values. Population is opt-in, prepared/reviewed before activation. Only the configured target field is written. The app's history actor name is managed separately from its UI title.
+
+## Keep records current
+
+Every functional change updates requirements, runtime architecture as needed, and `plan.md`. Jira tracking is separate and is not required to rebuild the app. Commit completed changes; synchronize only to the authorized private remote. A failed push is not a backup. Never commit credentials or local dependency folders.

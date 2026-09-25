@@ -1,5 +1,7 @@
 # Recovery status
 
+> This file is a deployment/recovery journal. For the current rebuild specification use [requirements](requirements.md), [runtime architecture](runtime-architecture.md), and the independent [plan](../plan.md). Earlier entries below describe historical states.
+
 ## Optional population and Done-target protection — September 24, 2026
 
 Deployed privately to development as 5.9.0. All 58 automated tests, ESLint and Forge lint pass. Live acceptance is pending. Activation defaults to **Future changes only**. Administrators may instead prepare a fixed list of targets by keys (up to 100 explicit keys per selection), inclusive target creation-date range, or all items in the configured target spaces. The date range uses Jira query timezone. Preparation reads the app-visible target keys in pages of 25 and stores the list without writing Jira fields. The UI reports the prepared target count, not a promise that every field value will change. A completed, current-revision list must be explicitly included in activation; changes to the selection require preparing again. Prepared lists expire after one hour. Refreshing a ready preview refreshes activation readiness without resaving the policy.
