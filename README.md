@@ -37,3 +37,5 @@ Every functional change updates requirements, runtime architecture as needed, an
 ## Contribute and report bugs
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for picking up unfinished work, proposing new features, and integrating GitHub changes. Record discoveries and fixes in [the bug register](docs/bugs.md). GitHub issue and pull-request templates are included; repository access remains private and owner-controlled.
+
+Verification update (2026-09-25): latency simplification deployed privately as development **5.10.0**. All **61 tests**, ESLint and Forge lint passed. Earlier 5.9.0/58-test references describe the reconstruction baseline; live latency comparison remains pending.

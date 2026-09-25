@@ -232,3 +232,9 @@ Update this plan with requirements and architecture whenever code or configurati
 ## Contribution and defect workflow
 
 Follow [CONTRIBUTING.md](CONTRIBUTING.md) and maintain [docs/bugs.md](docs/bugs.md) as defects emerge. Contributors may propose remaining tasks or new capabilities through private-repository pull requests. Keep stable local IDs and acceptance evidence in the repository, independent of Jira or conversation history. New proposals must identify scope and acceptance criteria before being marked implemented.
+
+## Processing latency improvement (2026-09-25)
+
+BUG-001: ordinary relationship updates now calculate the first discovered target for each affected policy inside the existing serialized discovery job. Additional targets and structural scans retain paginated queue jobs. Relationship enqueue operations no longer add an artificial two-second delay. The shared writer lock (including population), revision checks, Done guards, filters and unchanged-write suppression remain. Trace records add `sinceIngressMs` and `beforeJobMs`; these start at Forge ingress, not at the original Jira edit, and continuation timing includes prior processing. Live latency improvement remains to be verified after deployment.
+
+Verification update (2026-09-25): latency simplification deployed privately as development **5.10.0**. All **61 tests**, ESLint and Forge lint passed. Earlier 5.9.0/58-test references describe the reconstruction baseline; live latency comparison remains pending.

@@ -235,3 +235,9 @@ Deferred: Atlas Goals/KRs/OKRs, PR/development integrations, external databases 
 ## 12. Documentation contract
 
 Every functional, storage, security, runtime, lifecycle or quota change updates this file, the architecture document where applicable, and the standalone plan in the same commit. Keep **implemented**, **preview-only**, **pending** and **live-verified** separate. Archive obsolete notes rather than accumulating contradictory current claims. Jira can be updated independently, but must never be needed to rebuild or understand this specification.
+
+## Processing latency improvement (2026-09-25)
+
+BUG-001: ordinary relationship updates now calculate the first discovered target for each affected policy inside the existing serialized discovery job. Additional targets and structural scans retain paginated queue jobs. Relationship enqueue operations no longer add an artificial two-second delay. The shared writer lock (including population), revision checks, Done guards, filters and unchanged-write suppression remain. Trace records add `sinceIngressMs` and `beforeJobMs`; these start at Forge ingress, not at the original Jira edit, and continuation timing includes prior processing. Live latency improvement remains to be verified after deployment.
+
+Verification update (2026-09-25): latency simplification deployed privately as development **5.10.0**. All **61 tests**, ESLint and Forge lint passed. Earlier 5.9.0/58-test references describe the reconstruction baseline; live latency comparison remains pending.

@@ -71,13 +71,13 @@ The runtime has no full transactional lock. Assessment events are not serialized
 
 The compiler stores source/target project IDs, link ID, related root types, depth and dependency IDs. `statusCategory` filter dependencies map to `status`; structural dependencies include `parent`, `issuetype`, `project`. Protection adds the target field; Done exclusion adds target status. The diagnostic plan's `activationReady: false` is overridden in the activated runtime copy.
 
-Ingress stores identifiers only: event type, source issue key/project, destination project/link type and changed field IDs. It pushes to `relationship-jobs` with installation concurrency key `relationship-writes-v1`, limit 1 and an initial two-second delay. Delay is not a latency guarantee.
+Ingress stores identifiers only: event type, source issue key/project, destination project/link type and changed field IDs. It pushes to `relationship-jobs` with installation concurrency key `relationship-writes-v1`, limit 1 and no artificial delay. An ingress timestamp supports latency measurement.
 
 Dispatch reads active policies and filters to the event's dependencies/projects. For ordinary updates, reverse traversal reads source and up to two ancestors, uses JQL root-type filtering and discovers linked targets. It must not apply value/status filters during reverse routing: a departed contributor still affects its former aggregate. Current reverse routing caps linked targets at 50.
 
 Creation/deletion/link/parent/type/project events discover all targets in the configured target projects in 25-key pages. Each target is queued separately, with continuation pages; there is no ten-target project cap. Broad structural discovery covers removed links/parents without relying on old payload fields, at the cost of more work. Moving outside indexed source scope can still evade delivery.
 
-Each target job rechecks policy ID/revision, calculates current desired value, suppresses equality, rechecks active/revision and edit metadata, checks Done when configured and writes only the target. Current lifecycle check is not an atomic fence against concurrent Jira changes. 429/5xx failures are retried; permanent errors are recorded. Queue-dispatch failures are retryable. Repeated delivery can rediscover work, but fresh values suppress already-applied writes.
+Ordinary discovery evaluates the first target per affected policy in the same serialized job; additional targets are queued separately. Each target evaluation rechecks policy ID/revision, calculates current desired value, suppresses equality, rechecks active/revision and edit metadata, checks Done when configured and writes only the target. Current lifecycle check is not an atomic fence against concurrent Jira changes. 429/5xx failures are retried; permanent errors are recorded. Queue-dispatch failures are retryable. Repeated delivery can rediscover work, but fresh values suppress already-applied writes.
 
 ## 7. Narrow Jira adapter and calculation
 
@@ -148,3 +148,9 @@ Current duration/request metrics are useful indicators; UI dollar/operation esti
 Maintain requirements, architecture and standalone plan in the same change. Current baseline passed 58 automated tests plus ESLint/Forge lint; only the documented live Story-points-to-JPD update is confirmed. Population and the broader live matrix remain open.
 
 Platform contracts to reverify when changing APIs/manifest: [Jira events](https://developer.atlassian.com/platform/forge/events-reference/jira/), [Jira expression types](https://developer.atlassian.com/cloud/jira/platform/jira-expressions-type-reference/), [Forge async events](https://developer.atlassian.com/platform/forge/runtime-reference/async-events-api/). These sources explain API contracts; they do not certify this implementation.
+
+## Processing latency improvement (2026-09-25)
+
+BUG-001: ordinary relationship updates now calculate the first discovered target for each affected policy inside the existing serialized discovery job. Additional targets and structural scans retain paginated queue jobs. Relationship enqueue operations no longer add an artificial two-second delay. The shared writer lock (including population), revision checks, Done guards, filters and unchanged-write suppression remain. Trace records add `sinceIngressMs` and `beforeJobMs`; these start at Forge ingress, not at the original Jira edit, and continuation timing includes prior processing. Live latency improvement remains to be verified after deployment.
+
+Verification update (2026-09-25): latency simplification deployed privately as development **5.10.0**. All **61 tests**, ESLint and Forge lint passed. Earlier 5.9.0/58-test references describe the reconstruction baseline; live latency comparison remains pending.

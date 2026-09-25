@@ -67,7 +67,7 @@ test('structural reconciliation processes all 61 targets across continuation pag
  assert.equal(h.writes.length,61);assert.ok(h.writes.every(value=>value===11));
 });
 test('queued target job from an old revision cannot write',async()=>{
- const h=await harness();await h.raw.runRelationshipJob(update);assert.equal(h.writes.length,0);
+ const h=await harness();await h.raw.runRelationshipJob({body:{...update.body,eventType:'avi:jira:created:issue'}});assert.equal(h.writes.length,0);
  h.policy.revision='new';h.store.set('field-policies:v1',[h.policy]);
  await h.raw.runRelationshipJob({body:h.queued[0].body});assert.equal(h.writes.length,0);
 });
@@ -76,4 +76,22 @@ test('future Done-target protection skips writes and reopening can recalculate',
  const h=await harness();h.policy.skipDoneTargets=true;h.store.set('field-policies:v1',[h.policy]);h.setEligible(false);
  await h.m.runRelationshipJob(update);assert.equal(h.writes.length,0);
  h.setEligible(true);await h.m.runRelationshipJob(update);assert.deepEqual(h.writes,[11]);
+});
+
+test('ordinary updates calculate in the discovery job without another queue hop',async()=>{
+ const h=await harness();await h.raw.runRelationshipJob({body:{...update.body,receivedAt:Date.now()-100}});
+ assert.deepEqual(h.writes,[11]);assert.equal(h.queued.length,0);
+ const record=[...h.store.values()].find(v=>v?.outcome==='changed');
+ assert.ok(record.sinceIngressMs>=100);assert.ok(record.beforeJobMs>=100);
+});
+test('related policies complete in one serialized job and unchanged writes stay suppressed',async()=>{
+ const h=await harness();const second=structuredClone(h.policy);second.id='second';
+ h.store.set('field-policies:v1',[h.policy,second]);
+ await h.raw.runRelationshipJob(update);
+ assert.deepEqual(h.writes,[11]);assert.equal(h.queued.length,0);
+});
+test('ingress adds no artificial delay and keeps the shared writer lock',async()=>{
+ const h=await harness();await h.raw.enqueueRelationshipEvent({eventType:'avi:jira:updated:issue',issue:{key:'ABC-1',fields:{project:{id:'2'}}}});
+ assert.equal(h.queued[0].delayInSeconds,undefined);assert.equal(h.queued[0].concurrency.key,'relationship-writes-v1');
+ assert.equal(typeof h.queued[0].body.receivedAt,'number');
 });

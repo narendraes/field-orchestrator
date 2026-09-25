@@ -106,8 +106,9 @@ export async function calculateTarget(policy, targetKey, jira) {
 }
 
 async function pushJob(body) {
+  // No artificial delay: the shared concurrency key still serializes writers.
   try {
-    await queue.push({ body, concurrency: { key: 'relationship-writes-v1', limit: 1 }, delayInSeconds: 2 });
+    await queue.push({ body, concurrency: { key: 'relationship-writes-v1', limit: 1 } });
   } catch (cause) {
     const error = new Error('Could not queue remaining targets; discovery will retry.');
     error.retryable = true;
@@ -118,14 +119,16 @@ async function pushJob(body) {
 export async function enqueueRelationshipEvent(event) {
   // Invocation has already passed a manifest gate. Retain identifiers only.
   await queue.push({ body: {
-    eventType: event.eventType, key: event.issue?.key || '',
+    receivedAt: Date.now(), eventType: event.eventType, key: event.issue?.key || '',
     projectId: String(event.issue?.fields?.project?.id || event.issue?.project?.id || event.sourceProjectId || ''),
     destinationProjectId: String(event.destinationProjectId || ''), linkTypeId: String(event.issueLinkType?.id || ''),
     changedFields: (event.changelog?.items || []).map(item => item.fieldId).filter(Boolean).slice(0, 100)
-  }, concurrency: { key: 'relationship-writes-v1', limit: 1 }, delayInSeconds: 2 });
+  }, concurrency: { key: 'relationship-writes-v1', limit: 1 } });
 }
 
 export async function runRelationshipJob({ body }) {
+  const jobStartedAt = Date.now();
+  body = { ...body, jobStartedAt };
   const policies = (await kvs.get('field-policies:v1') || []).filter(policy => policy.status === 'active' && policy.behaviorType === 'relationship');
   for (const policy of policies) {
     if (body.policyId && (policy.id !== body.policyId || policy.revision !== body.policyRevision)) continue;
@@ -157,9 +160,12 @@ export async function runRelationshipJob({ body }) {
         if (target && (policy.protect || policy.skipDoneTargets)) targets.push({ key: body.key });
       }
       if (!body.targetKey) {
-        for (const key of [...new Set(targets.map(item => item.key))]) await pushJob({ ...body, policyId: policy.id, policyRevision: policy.revision, targetKey: key });
-        if (!targets.length) await recordRelationshipRun(policy, body, body.key, 'no-targets', started, jira.requests(), true);
-        continue;
+        const uniqueTargets = [...new Set(targets.map(item => item.key))];
+        // The discovery job already holds the shared write lock. Evaluate its
+        // first target here so related policies need no extra queue round trip.
+        // Fan-out remains bounded: all additional targets use separate jobs.
+        for (const key of uniqueTargets.slice(1)) await pushJob({ ...body, policyId: policy.id, policyRevision: policy.revision, targetKey: key });
+        targets = uniqueTargets.slice(0, 1).map(key => ({ key }));
       }
       if (!targets.length) await recordRelationshipRun(policy, body, body.key, 'no-targets', started, jira.requests(), true);
       for (const key of [...new Set(targets.map(item => item.key))]) {
@@ -188,7 +194,8 @@ export async function runRelationshipJob({ body }) {
 async function recordRelationshipRun(policy, body, key, outcome, started, requests, debugOnly = false, message = '') {
   const record = { traceId: `fo-rel-${crypto.randomUUID()}`, policyId: policy.id, policyName: policy.name,
     workItemKey: key, sourceKey: body.key, outcome, kind: 'runtime', revision: policy.revision,
-    changedFieldIds: body.changedFields || [], message: String(message).slice(0, 200), eventType: body.eventType, createdAt: new Date().toISOString(), durationMs: Date.now() - started, jiraRequests: requests };
+    changedFieldIds: body.changedFields || [], message: String(message).slice(0, 200), eventType: body.eventType, createdAt: new Date().toISOString(), durationMs: Date.now() - started, jiraRequests: requests,
+    ...(Number.isFinite(body.receivedAt) ? { sinceIngressMs: Date.now() - body.receivedAt, beforeJobMs: body.jobStartedAt - body.receivedAt } : {}) };
   try {
     const setting = await kvs.get(`diagnostics:v1:${policy.id}`);
     if (setting?.until > Date.now()) await kvs.set(`diagnostic-run:v1:${policy.id}:${Math.floor(Math.random() * 20)}`, record);
