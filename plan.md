@@ -41,7 +41,7 @@ Dependencies: none. Exit: a reproducible private Forge app, with preserved ident
 - [x] P0.04 — Keep reusable examples installation-neutral and application distribution private.
 - [x] P0.05 — Rename heading/navigation to AutoUp; preserve technical identifiers for compatibility.
 - [ ] P0.06 — Complete and verify Atlassian console/app-user history branding; a module-title deployment is not proof of actor renaming.
-- [ ] P0.07 — Restore reliable GitHub synchronization after the existing destination-approval block is resolved. Never force-push or claim an unverified backup.
+- [x] P0.07 — Owner confirmed the exact repository destination on 2026-09-25; main successfully pushed through implementation commit 2628824. Continue verifying each push; never force-push.
 - [ ] P0.08 — Record a clean-machine install/build/restore exercise and dependency audit. Do not infer reproducibility from a previously installed local dependency tree.
 
 Rebuild procedure:
@@ -252,4 +252,4 @@ Live acceptance (2026-09-25, development 5.10.0): a five-point Story moved to In
 
 Live scaling evidence must distinguish reduced writes from remaining per-event ingress/routing cost. No fixed one-second response or guaranteed single write for an entire live burst is claimed. Population remains opt-in and outside these batches.
 
-R17 release evidence (2026-09-25): deployed privately to development as **5.11.0**. All **73 automated tests**, ESLint and Forge lint passed. The controlled 100-distinct-source pending burst produced one target calculation/write; two policies produced one fields-map edit. Live combined-history and burst-capacity acceptance remain pending. GitHub push blocked by automatic approval review pending exact destination/payload confirmation.
+R17 release evidence (2026-09-25): deployed privately to development as **5.11.0**. All **73 automated tests**, ESLint and Forge lint passed. The controlled 100-distinct-source pending burst produced one target calculation/write; two policies produced one fields-map edit. Live combined-history and burst-capacity acceptance remain pending. GitHub destination/payload approval resolved by the owner on 2026-09-25; implementation commit 2628824 successfully pushed to origin/main.
