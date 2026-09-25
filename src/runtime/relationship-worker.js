@@ -1,5 +1,5 @@
 import api, { route } from '@forge/api';
-import { kvs } from '@forge/kvs';
+import { kvs, WhereConditions } from '@forge/kvs';
 import { Queue } from '@forge/events';
 import { calculateRelationshipRollup } from './relationship-rollup';
 import { traceRelationshipTargets } from './relationship-routing';
@@ -121,14 +121,80 @@ async function pushJob(body) {
   }
 }
 
+const INBOX_PREFIX = 'relationship-inbox:v1:';
+const INBOX_BATCH_SIZE = 10;
+
 export async function enqueueRelationshipEvent(event) {
-  // Invocation has already passed a manifest gate. Retain identifiers only.
-  await queue.push({ body: {
+  // Unique immutable inbox records allow concurrent ingress without racing over
+  // one shared array. Only identifiers are retained, after the manifest gate.
+  const inboxId = `${INBOX_PREFIX}${crypto.randomUUID()}`;
+  const body = {
     receivedAt: Date.now(), eventType: event.eventType, key: event.issue?.key || '',
     projectId: String(event.issue?.fields?.project?.id || event.issue?.project?.id || event.sourceProjectId || ''),
     destinationProjectId: String(event.destinationProjectId || ''), linkTypeId: String(event.issueLinkType?.id || ''),
     changedFields: (event.changelog?.items || []).map(item => item.fieldId).filter(Boolean).slice(0, 100)
-  }, concurrency: { key: 'relationship-writes-v1', limit: 1 } });
+  };
+  await kvs.set(inboxId, body);
+  await pushJob({ inboxId });
+}
+
+function cachedDiscovery(jira) {
+  const reads = new Map(), searches = new Map();
+  return { ...jira,
+    readIssue: (key, fields) => {
+      const signature = JSON.stringify([key, fields]);
+      if (!reads.has(signature)) reads.set(signature, jira.readIssue(key, fields));
+      return reads.get(signature);
+    },
+    searchIssues: (jql, fields, limit) => {
+      const signature = JSON.stringify([jql, fields, limit]);
+      if (!searches.has(signature)) searches.set(signature, jira.searchIssues(jql, fields, limit));
+      return searches.get(signature);
+    }
+  };
+}
+
+async function runInbox(body, workerStartedAt) {
+  // Always read the waking record directly: a prefix query can lag behind writes.
+  // Other records omitted by that query retain their own wake-up and are not lost.
+  const own = await kvs.get(body.inboxId);
+  const page = await kvs.query().where('key', WhereConditions.beginsWith(INBOX_PREFIX)).limit(INBOX_BATCH_SIZE).getMany();
+  const records = new Map(own ? [[body.inboxId, own]] : []);
+  for (const item of page.results || []) {
+    if (records.size >= INBOX_BATCH_SIZE) break;
+    records.set(item.key, item.value);
+  }
+  const targets = new Map(), jira = cachedDiscovery(jiraAccess()), routes = new Map();
+  const discoveryPolicies = (await kvs.get('field-policies:v1') || []).filter(p => p.status === 'active' && p.behaviorType === 'relationship');
+  const routingStartedAt = Date.now();
+  const processed = [];
+  for (const [key, value] of records) {
+    // Bound batching work as well as record count; unread entries retain wakes.
+    if (processed.length && Date.now() - routingStartedAt >= 15000) break;
+    await runRelationshipJob({ body: value, collector: targets, discoveryJira: jira, discoveryRoutes: routes, discoveryPolicies });
+    processed.push(key);
+  }
+  const routingMs = Date.now() - routingStartedAt;
+  // Do useful work while holding the writer slot, rather than enqueueing a
+  // second job that immediately contends with this same slot. Only one target
+  // runs inline, bounding the invocation; remaining targets stay durable/queued.
+  const jobs = [...targets].map(([key, token]) => ({ flushTarget: key, token, jobStartedAt: workerStartedAt,
+    discoveryMs: routingMs, inboxBatchSize: processed.length, discoveryRequests: jira.requests() }));
+  for (const job of jobs.slice(1)) await ensureScheduled(job);
+  if (jobs[0]) await flushTarget(jobs[0], (await kvs.get('field-policies:v1') || []).filter(p => p.status === 'active' && p.behaviorType === 'relationship'));
+  // Acknowledge only after writes or durable continuation dispatch. On a crash,
+  // replay reads current values and suppresses a previously successful write.
+  for (const key of processed) await kvs.delete(key);
+}
+
+async function ensureScheduled(job) {
+  const key = pendingKey(job.flushTarget), pending = await kvs.get(key);
+  if (!pending || pending.token !== job.token) return;
+  if (!pending.scheduled || Date.now() - (pending.scheduledAt || 0) > 5 * 60 * 1000) {
+    await pushJob(job);
+    pending.scheduled = true; pending.scheduledAt = Date.now();
+    await kvs.set(key, pending);
+  }
 }
 
 // Only workers using the shared installation concurrency key may mutate these
@@ -137,7 +203,7 @@ export async function enqueueRelationshipEvent(event) {
 const permanentError = message => Object.assign(new Error(message), { retryable: false });
 const pendingKey = key => `relationship-pending:v1:${key}`;
 
-async function scheduleTarget(key, policy, body) {
+async function scheduleTarget(key, policy, body, collector) {
   const storageKey = pendingKey(key);
   const pending = await kvs.get(storageKey) || { token: crypto.randomUUID(), refs: {}, count: 0, receivedAt: body.receivedAt || Date.now(), scheduled: false };
   pending.receivedAt = Math.min(pending.receivedAt, body.receivedAt || Date.now());
@@ -151,6 +217,7 @@ async function scheduleTarget(key, policy, body) {
       !!(previous?.revision === policy.revision && previous?.activatedAt === (policy.activatedAt || '') && previous?.restore)
   };
   await kvs.set(storageKey, pending);
+  if (collector) { collector.set(key, pending.token); return; }
   if (!pending.scheduled || Date.now() - (pending.scheduledAt || 0) > 5 * 60 * 1000) {
     // Persist before enqueue; on enqueue failure a retried discovery can schedule
     // the unscheduled record. A crash after enqueue may duplicate flushes, which
@@ -244,11 +311,12 @@ async function flushTarget(body, allPolicies) {
   }
 }
 
-export async function runRelationshipJob({ body }) {
+export async function runRelationshipJob({ body, collector, discoveryJira, discoveryRoutes, discoveryPolicies }) {
+  if (body.inboxId) return runInbox(body, Date.now());
   body = { ...body, jobStartedAt: Date.now() };
-  const policies = (await kvs.get('field-policies:v1') || []).filter(policy => policy.status === 'active' && policy.behaviorType === 'relationship');
+  const policies = discoveryPolicies || (await kvs.get('field-policies:v1') || []).filter(policy => policy.status === 'active' && policy.behaviorType === 'relationship');
   if (body.flushTarget) return flushTarget(body, policies);
-  const jira = jiraAccess(), routes = new Map();
+  const jira = discoveryJira || jiraAccess(), routes = discoveryRoutes || new Map();
   for (const policy of policies) {
     if (body.policyId && (policy.id !== body.policyId || policy.revision !== body.policyRevision)) continue;
     const plan = policy.runtime.plan;
@@ -276,7 +344,7 @@ export async function runRelationshipJob({ body }) {
         } else targets = [];
         if (target && (policy.protect || policy.skipDoneTargets)) targets.push({ key: body.key });
       }
-      for (const key of [...new Set(targets.map(item => item.key))]) await scheduleTarget(key, policy, body);
+      for (const key of [...new Set(targets.map(item => item.key))]) await scheduleTarget(key, policy, body, collector);
       if (!targets.length) await recordRelationshipRun(policy, body, body.key, 'no-targets', started, jira.requests(), true);
     } catch (error) {
       await recordRelationshipRun(policy, body, body.key, 'error', started, jira.requests(), false, error.message);
@@ -289,9 +357,10 @@ export async function runRelationshipJob({ body }) {
 async function recordRelationshipRun(policy, body, key, outcome, started, requests, debugOnly = false, message = '') {
   const record = { traceId: `fo-rel-${crypto.randomUUID()}`, policyId: policy.id, policyName: policy.name,
     workItemKey: key, sourceKey: body.key, outcome, kind: 'runtime', revision: policy.revision,
+    ...(body.inboxBatchSize ? { inboxBatchSize: body.inboxBatchSize, discoveryMs: body.discoveryMs, discoveryRequests: body.discoveryRequests } : {}),
     ...(body.batchId ? { batchId: body.batchId, batchPolicyCount: body.batchPolicyCount, mergedSignals: body.mergedSignals, requestCountScope: 'shared-target-batch' } : {}),
     changedFieldIds: body.changedFields || [], message: String(message).slice(0, 200), eventType: body.eventType, createdAt: new Date().toISOString(), durationMs: Date.now() - started, jiraRequests: requests,
-    ...(Number.isFinite(body.receivedAt) ? { sinceIngressMs: Date.now() - body.receivedAt, beforeJobMs: body.jobStartedAt - body.receivedAt } : {}) };
+    ...(Number.isFinite(body.receivedAt) ? { sinceIngressMs: Date.now() - body.receivedAt, beforeJobMs: Math.max(0, body.jobStartedAt - body.receivedAt) } : {}) };
   try {
     const setting = await kvs.get(`diagnostics:v1:${policy.id}`);
     if (setting?.until > Date.now()) await kvs.set(`diagnostic-run:v1:${policy.id}:${Math.floor(Math.random() * 20)}`, record);

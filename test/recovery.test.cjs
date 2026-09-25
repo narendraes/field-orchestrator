@@ -14,7 +14,7 @@ async function harness(runtime=false) {
  let data={};if(url.includes('/mypermissions'))data={permissions:{ADMINISTER:{havePermission:state.admin}}};else if(url.endsWith('/field'))data=['source','target'].map(id=>({id,schema:{type:state.numeric?'number':'string'}}));else if(url.includes('/search/jql'))data={issues:Array.from({length:61},(_,i)=>({key:'ABC-'+(i+1),fields:{project:{id:'1'}}}))};else if(url.endsWith('/editmeta'))data={fields:{target:{schema:{type:'number'}}}};else if(url.includes('/expression/'))data={value:state.matches};else if(options.method==='PUT'&&url.includes('/issue/'))state.target=JSON.parse(options.body).fields.target;else if(url.includes('/issue/'))data={key:'ABC-1',fields:{project:{id:'1'},target:state.target,issuelinks:[]}};return {ok:true,status:200,json:async()=>data};};
  const api={asUser:()=>({requestJira}),asApp:()=>({requestJira})}; const route=(s,...v)=>s.reduce((a,x,i)=>a+x+(v[i]??''),'');
  const context=vm.createContext({console:{info(){},error(){},warn(){}},crypto:{randomUUID}});
- const mocks={'@forge/api':{default:api,route},'@forge/kvs':{kvs},'@forge/resolver':{default:Resolver}};
+ const mocks={'@forge/api':{default:api,route},'@forge/kvs':{kvs,WhereConditions:{beginsWith:value=>value}},'@forge/resolver':{default:Resolver}};
  const mod=new vm.SourceTextModule(fs.readFileSync(runtime?'src/runtime/issue-updated.js':'src/resolvers/index.js','utf8'),{context});
  const path=require('node:path');
  const cache=new Map();

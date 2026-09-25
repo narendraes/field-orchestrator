@@ -47,3 +47,10 @@ Live acceptance (2026-09-25, development 5.10.0): a five-point Story moved to In
 Implemented one combined target edit for participating numeric rollup fields, shared reads and durable pending-signal merging. This supersedes separate writes observed in 5.10. Live verification and burst-capacity measurement remain pending; regression results and deployment recorded below.
 
 R17 release evidence (2026-09-25): deployed privately to development as **5.11.0**. All **73 automated tests**, ESLint and Forge lint passed. The controlled 100-distinct-source pending burst produced one target calculation/write; two policies produced one fields-map edit. Live combined-history and burst-capacity acceptance remain pending. GitHub destination/payload approval resolved by the owner on 2026-09-25; implementation commit 2628824 successfully pushed to origin/main.
+
+
+### BUG-001 — deeper scheduling investigation
+
+Combined edits alone do not establish acceptable latency. A producer can enqueue work that contends with its own writer slot; site-wide serialization also limits unrelated targets. R18 adds durable ingress batching and primary-target inline execution while retaining the same writer lock. Phase measurements and multi-target live acceptance remain required. No customer-specific telemetry is included in this design update.
+
+R18 verification: private development **5.12.0** deployed on 2026-09-25. **79 tests**, ESLint and Forge lint passed. The mocked ingress burst confirmed ten calculations and one changed-value write for 100 pending events on a shared target. Live latency/capacity remains unverified. Discovery stops accepting additional records after 15 seconds between records, as well as the ten-record maximum; this does not interrupt an in-flight request.

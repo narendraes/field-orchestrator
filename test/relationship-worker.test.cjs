@@ -6,7 +6,7 @@ const vm=require('node:vm');
 const {randomUUID}=require('node:crypto');
 async function harness(targetCount=1){
  const context=vm.createContext({console:{info(){},warn(){}},crypto:{randomUUID}}),store=new Map(),writes=[],queued=[],writeBodies=[],requests=[];
- let points=11,target=3,linked=true,editable=true,matching=true,eligible=true,putStatus=200,pushFailure=false,deleteFailure=false,onPut=null;
+ let points=11,target=3,linked=true,editable=true,matching=true,eligible=true,putStatus=200,pushFailure=false,deleteFailure=false,onPut=null,queryVisible=true;
  const targetValues=new Map();
  const policy={id:'p',revision:'r',name:'Rollup',status:'active',behaviorType:'relationship',projectIds:['1'],sourceProjectIds:['2'],targetFieldId:'customfield_2',sourceFieldId:'customfield_1',aggregation:'sum',filters:[],runtime:{plan:{sourceProjectIds:['2'],targetProjectIds:['1'],sourceFieldIds:['customfield_1','status','parent','issuetype','project'],targetFieldIds:['customfield_2'],linkTypeId:'7',relatedIssueTypeIds:['9'],hierarchyDepth:1,maxTargets:50}}};store.set('field-policies:v1',[policy]);
  const requestJira=async(url,options={})=>{
@@ -30,14 +30,14 @@ async function harness(targetCount=1){
  else data={key:'ABC-2',fields:{project:{id:'2'},issuelinks:[{type:{id:'7'},inwardIssue:{key:'IDEA-1'}}]}};
  return {ok:true,status:200,json:async()=>data};
  };
- const mocks={'@forge/api':{default:{asApp:()=>({requestJira}),asUser:()=>({requestJira})},route:(s,...v)=>s.reduce((a,x,i)=>a+x+(v[i]??''),'')},'@forge/kvs':{kvs:{get:async k=>structuredClone(store.get(k)),set:async(k,v)=>store.set(k,structuredClone(v)),delete:async k=>{if(deleteFailure){deleteFailure=false;throw new Error("checkpoint unavailable");}store.delete(k);}}},'@forge/events':{Queue:class{async push(item){if(pushFailure)throw new Error("queue unavailable");queued.push(item);}}}};
+ const mocks={'@forge/api':{default:{asApp:()=>({requestJira}),asUser:()=>({requestJira})},route:(s,...v)=>s.reduce((a,x,i)=>a+x+(v[i]??''),'')},'@forge/kvs':{WhereConditions:{beginsWith:value=>value},kvs:{query:()=>{let prefix='',size=10;const q={where:(field,value)=>{prefix=value;return q;},limit:value=>{size=value;return q;},getMany:async()=>({results:queryVisible?[...store].filter(([key])=>key.startsWith(prefix)).slice(0,size).map(([key,value])=>({key,value:structuredClone(value)})):[]})};return q;},get:async k=>structuredClone(store.get(k)),set:async(k,v)=>store.set(k,structuredClone(v)),delete:async k=>{if(deleteFailure){deleteFailure=false;throw new Error("checkpoint unavailable");}store.delete(k);}}},'@forge/events':{Queue:class{async push(item){if(pushFailure)throw new Error("queue unavailable");queued.push(item);}}}};
  const cache=new Map();async function load(filename){if(cache.has(filename))return cache.get(filename);const mod=new vm.SourceTextModule(fs.readFileSync(filename,'utf8'),{context,identifier:filename});cache.set(filename,mod);await mod.link(async(n,parent)=>{if(mocks[n])return new vm.SyntheticModule(Object.keys(mocks[n]),function(){for(const[k,v]of Object.entries(mocks[n]))this.setExport(k,v);},{context});return load(path.resolve(path.dirname(parent.identifier),n+'.js'));});return mod;}
  const mod=await load(path.resolve('src/runtime/relationship-worker.js'));await mod.evaluate();
  return {m:{...mod.namespace,runRelationshipJob:async event=>{
  await mod.namespace.runRelationshipJob(event);
  let count=0;
  while(queued.length){if(++count>1000)throw new Error('Queue did not drain');await mod.namespace.runRelationshipJob({body:queued.shift().body});}
- }},raw:mod.namespace,policy,store,writes,queued,writeBodies,requests,setPutStatus:v=>putStatus=v,setPushFailure:v=>pushFailure=v,failDelete:()=>deleteFailure=true,onPut:fn=>onPut=fn,setPoints:v=>points=v,setTarget:v=>{target=v;targetValues.clear();},unlink:()=>linked=false,deny:()=>editable=false,setEligible:v=>eligible=v,setMatching:v=>matching=v};
+ }},raw:mod.namespace,policy,store,writes,queued,writeBodies,requests,setQueryVisible:v=>queryVisible=v,setPutStatus:v=>putStatus=v,setPushFailure:v=>pushFailure=v,failDelete:()=>deleteFailure=true,onPut:fn=>onPut=fn,setPoints:v=>points=v,setTarget:v=>{target=v;targetValues.clear();},unlink:()=>linked=false,deny:()=>editable=false,setEligible:v=>eligible=v,setMatching:v=>matching=v};
 }
 const update={body:{eventType:'avi:jira:updated:issue',projectId:'2',key:'ABC-1',changedFields:['customfield_1']}};
 test('story points update writes target once; duplicate event is a no-op',async()=>{const h=await harness();await h.m.runRelationshipJob(update);assert.deepEqual(h.writes,[11]);await h.m.runRelationshipJob(update);assert.deepEqual(h.writes,[11]);});
@@ -100,7 +100,7 @@ test('two policies share hierarchy reads and write two target fields in one Jira
 test('ingress adds no artificial delay and keeps the shared writer lock',async()=>{
  const h=await harness();await h.raw.enqueueRelationshipEvent({eventType:'avi:jira:updated:issue',issue:{key:'ABC-1',fields:{project:{id:'2'}}}});
  assert.equal(h.queued[0].delayInSeconds,undefined);assert.equal(h.queued[0].concurrency.key,'relationship-writes-v1');
- assert.equal(typeof h.queued[0].body.receivedAt,'number');
+ assert.equal(typeof h.store.get(h.queued[0].body.inboxId).receivedAt,'number');
 });
 
 test('100 pending source updates collapse into one target calculation and final write',async()=>{
@@ -175,4 +175,42 @@ test('different calculations still produce one fields map and no extra write on 
  const h=await harness();const second=structuredClone(h.policy);second.id='count';second.targetFieldId='customfield_3';second.aggregation='count';
  h.store.set('field-policies:v1',[h.policy,second]);await h.m.runRelationshipJob(update);
  assert.deepEqual(h.writeBodies,[{customfield_2:11,customfield_3:1}]);await h.m.runRelationshipJob(update);assert.equal(h.writeBodies.length,1);
+});
+
+const sourceEvent=n=>({eventType:'avi:jira:updated:issue',issue:{key:'ABC-'+n,fields:{project:{id:'2'}}},changelog:{items:[{fieldId:'customfield_1'}]}});
+test('single live ingress calculates both fields without scheduling another competing worker',async()=>{
+ const h=await harness();const second=structuredClone(h.policy);second.id='second';second.targetFieldId='customfield_3';h.store.set('field-policies:v1',[h.policy,second]);
+ await h.raw.enqueueRelationshipEvent(sourceEvent(1));const wake=h.queued.shift();
+ await h.raw.runRelationshipJob({body:wake.body});assert.equal(h.queued.length,0);
+ assert.deepEqual(h.writeBodies,[{customfield_2:11,customfield_3:11}]);
+ assert.equal([...h.store.keys()].filter(k=>k.startsWith('relationship-inbox:')).length,0);
+});
+test('100 live ingress records drain in batches of ten, not 100 full rollups',async t=>{
+ const h=await harness();h.setPoints(100);
+ for(let n=1;n<=100;n++)await h.raw.enqueueRelationshipEvent(sourceEvent(n));
+ await h.m.runRelationshipJob({body:h.queued.shift().body});
+ assert.deepEqual(h.writeBodies,[{customfield_2:100}]);
+ assert.equal(h.requests.filter(r=>r.options.body?.includes('parent in')).length,10);
+ assert.equal([...h.store.keys()].filter(k=>k.startsWith('relationship-inbox:')).length,0);
+ t.diagnostic('100 ingress messages: 10 hierarchy calculations, 1 changed target write; mocked workload, not live throughput.');
+});
+test('prefix query lag cannot lose the waking event',async()=>{
+ const h=await harness();h.setQueryVisible(false);await h.raw.enqueueRelationshipEvent(sourceEvent(1));
+ await h.m.runRelationshipJob({body:h.queued.shift().body});assert.deepEqual(h.writes,[11]);
+});
+test('ingress queue failure leaves a durable record recoverable by a later wake',async()=>{
+ const h=await harness();h.setPushFailure(true);await assert.rejects(()=>h.raw.enqueueRelationshipEvent(sourceEvent(1)),/queue/);
+ h.setPushFailure(false);await h.raw.enqueueRelationshipEvent(sourceEvent(2));await h.m.runRelationshipJob({body:h.queued.shift().body});
+ assert.deepEqual(h.writes,[11]);assert.equal([...h.store.keys()].filter(k=>k.startsWith('relationship-inbox:')).length,0);
+});
+test('an event arriving during inline write retains its own wake and converges',async()=>{
+ const h=await harness();let incoming;
+ h.onPut(()=>{h.setPoints(23);incoming=h.raw.enqueueRelationshipEvent(sourceEvent(2));});
+ await h.raw.enqueueRelationshipEvent(sourceEvent(1));await h.raw.runRelationshipJob({body:h.queued.shift().body});
+ await incoming;h.onPut(null);await h.m.runRelationshipJob({body:h.queued.shift().body});assert.deepEqual(h.writes,[11,23]);
+});
+test('inline transient failure preserves inbox until successful replay',async()=>{
+ const h=await harness();await h.raw.enqueueRelationshipEvent(sourceEvent(1));const wake=h.queued.shift();h.setPutStatus(429);
+ await assert.rejects(()=>h.raw.runRelationshipJob({body:wake.body}),/429/);assert.ok(h.store.has(wake.body.inboxId));
+ h.setPutStatus(200);await h.raw.runRelationshipJob({body:wake.body});assert.deepEqual(h.writes,[11]);assert.equal(h.store.has(wake.body.inboxId),false);
 });

@@ -253,3 +253,16 @@ Live acceptance (2026-09-25, development 5.10.0): a five-point Story moved to In
 Live scaling evidence must distinguish reduced writes from remaining per-event ingress/routing cost. No fixed one-second response or guaranteed single write for an entire live burst is claimed. Population remains opt-in and outside these batches.
 
 R17 release evidence (2026-09-25): deployed privately to development as **5.11.0**. All **73 automated tests**, ESLint and Forge lint passed. The controlled 100-distinct-source pending burst produced one target calculation/write; two policies produced one fields-map edit. Live combined-history and burst-capacity acceptance remain pending. GitHub destination/payload approval resolved by the owner on 2026-09-25; implementation commit 2628824 successfully pushed to origin/main.
+
+
+## R18 — upstream consolidation and scale evidence
+
+- [x] P4.23 — Durable unique ingress records; bounded ten-event discovery batches and shared read cache.
+- [x] P4.24 — Inline the primary consolidated target under the existing writer slot; retain durable extra-target continuations and legacy job support.
+- [x] P6.14 — Test live-ingress-shaped burst, query lag, incoming event during write, retries and inbox cleanup; distinguish simulation from live capacity.
+- [ ] P4.25 — Implement coordinated target-hashed writer lanes and bounded discovery concurrency, including population and old-job migration.
+- [ ] P6.15 — Compare live single-target, independent-target and population-overlap latency and quota consumption before claiming scale readiness.
+
+See [performance-design.md](docs/performance-design.md) for the capacity model, constraints and acceptance gate. BUG-001 remains open pending measured end-to-end improvement.
+
+R18 verification: private development **5.12.0** deployed on 2026-09-25. **79 tests**, ESLint and Forge lint passed. The mocked ingress burst confirmed ten calculations and one changed-value write for 100 pending events on a shared target. Live latency/capacity remains unverified. Discovery stops accepting additional records after 15 seconds between records, as well as the ten-record maximum; this does not interrupt an in-flight request.
