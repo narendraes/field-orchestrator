@@ -33,3 +33,7 @@ Deployment does not automatically activate drafts or populate existing values. P
 ## Keep records current
 
 Every functional change updates requirements, runtime architecture as needed, and `plan.md`. Jira tracking is separate and is not required to rebuild the app. Commit completed changes; synchronize only to the authorized private remote. A failed push is not a backup. Never commit credentials or local dependency folders.
+
+## Contribute and report bugs
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for picking up unfinished work, proposing new features, and integrating GitHub changes. Record discoveries and fixes in [the bug register](docs/bugs.md). GitHub issue and pull-request templates are included; repository access remains private and owner-controlled.

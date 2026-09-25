@@ -228,3 +228,7 @@ Current evidence: baseline automated suite has 58 passing tests; user confirmed 
 ## Documentation maintenance
 
 Update this plan with requirements and architecture whenever code or configuration changes. Keep historical notes in `docs/history/`, and keep Jira progress separate. A task may be implemented but still have an unchecked acceptance/hardening task. Future agents must be able to understand exactly that distinction without external tracking access.
+
+## Contribution and defect workflow
+
+Follow [CONTRIBUTING.md](CONTRIBUTING.md) and maintain [docs/bugs.md](docs/bugs.md) as defects emerge. Contributors may propose remaining tasks or new capabilities through private-repository pull requests. Keep stable local IDs and acceptance evidence in the repository, independent of Jira or conversation history. New proposals must identify scope and acceptance criteria before being marked implemented.

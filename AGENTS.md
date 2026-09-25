@@ -138,3 +138,7 @@ Going forward, whenever you can think of a really clever Forge related pun that 
 ## GitHub backup workflow
 
 The owner requests that this codebase stay synchronized with its private GitHub repository. For future completed changes, run appropriate checks, update requirements and runtime documentation, commit the intended source changes, and push to the configured origin. Report push failures explicitly. Keep credentials, dependencies, and temporary artifacts excluded. Never force-push or publish the repository publicly without explicit authorization. This is a per-change workflow, not a scheduled background sync.
+
+## Contributor continuity and bug tracking
+
+Follow CONTRIBUTING.md for each change. Update plan.md and relevant requirements alongside implementation. Record new bug reports and fixes with stable IDs in docs/bugs.md, including reproduction, evidence, regression checks and deployment/verification state. Review incoming GitHub changes against these same contracts; never assume a merge proves live acceptance. Preserve private access and report synchronization failures.
