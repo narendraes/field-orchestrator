@@ -37,9 +37,13 @@ export function jiraAccess(asUser = false) {
   const request = async (path, options = {}) => {
     requests += 1;
     if (requests > 250) throw new Error('Relationship request budget exceeded; narrow the policy.');
-    const response = await (asUser ? api.asUser() : api.asApp()).requestJira(path, options);
+    let response;
+    try { response = await (asUser ? api.asUser() : api.asApp()).requestJira(path, options); }
+    catch (error) { error.retryable = true; throw error; }
     if (!response.ok) { const error = new Error(`Jira request failed (${response.status}); no partial total is written.`); error.retryable = response.status === 429 || response.status >= 500; throw error; }
-    return response.status === 204 ? null : response.json();
+    if (response.status === 204 || options.method === 'PUT') return null;
+    try { return await response.json(); }
+    catch (error) { error.retryable = true; throw error; }
   };
   return {
     requests: () => requests,
@@ -66,6 +70,7 @@ export function jiraAccess(asUser = false) {
       } while (nextPageToken);
       return items;
     },
+    writeFields: (key, fields) => request(route`/rest/api/3/issue/${key}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ fields }) }),
     write: (key, fieldId, value) => request(route`/rest/api/3/issue/${key}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ fields: { [fieldId]: value } }) })
   };
 }
@@ -126,10 +131,124 @@ export async function enqueueRelationshipEvent(event) {
   }, concurrency: { key: 'relationship-writes-v1', limit: 1 } });
 }
 
+// Only workers using the shared installation concurrency key may mutate these
+// records. Ingress never performs a racing read/modify/write. Queue ordering is
+// deliberately irrelevant: whichever discoveries arrive before flush are merged.
+const permanentError = message => Object.assign(new Error(message), { retryable: false });
+const pendingKey = key => `relationship-pending:v1:${key}`;
+
+async function scheduleTarget(key, policy, body) {
+  const storageKey = pendingKey(key);
+  const pending = await kvs.get(storageKey) || { token: crypto.randomUUID(), refs: {}, count: 0, receivedAt: body.receivedAt || Date.now(), scheduled: false };
+  pending.receivedAt = Math.min(pending.receivedAt, body.receivedAt || Date.now());
+  pending.count += 1;
+  const previous = pending.refs[policy.id];
+  pending.refs[policy.id] = {
+    revision: policy.revision, activatedAt: policy.activatedAt || '',
+    key: body.key || '', eventType: body.eventType,
+    changedFields: body.changedFields || [],
+    restore: !!(policy.protect && body.key === key && body.changedFields?.includes(policy.targetFieldId)) ||
+      !!(previous?.revision === policy.revision && previous?.activatedAt === (policy.activatedAt || '') && previous?.restore)
+  };
+  await kvs.set(storageKey, pending);
+  if (!pending.scheduled || Date.now() - (pending.scheduledAt || 0) > 5 * 60 * 1000) {
+    // Persist before enqueue; on enqueue failure a retried discovery can schedule
+    // the unscheduled record. A crash after enqueue may duplicate flushes, which
+    // are harmless because each flush checks its generation token.
+    await pushJob({ flushTarget: key, token: pending.token });
+    pending.scheduled = true;
+    pending.scheduledAt = Date.now();
+    await kvs.set(storageKey, pending);
+  }
+}
+
+function sharedReads(jira, target, key) {
+  const searches = new Map();
+  return { ...jira,
+    readIssue: (itemKey, fields) => itemKey === key ? Promise.resolve(target) : jira.readIssue(itemKey, fields),
+    searchIssues: (jql, fields, limit = 500) => {
+      const signature = JSON.stringify([jql, fields, limit]);
+      if (!searches.has(signature)) searches.set(signature, jira.searchIssues(jql, fields, limit));
+      return searches.get(signature);
+    }
+  };
+}
+
+async function flushTarget(body, allPolicies) {
+  const key = body.flushTarget, storageKey = pendingKey(key);
+  const pending = await kvs.get(storageKey);
+  if (!pending || pending.token !== body.token) return;
+  const policies = allPolicies.filter(policy => {
+    const ref = pending.refs[policy.id];
+    return ref && ref.revision === policy.revision && ref.activatedAt === (policy.activatedAt || '');
+  });
+  const started = Date.now(), jira = jiraAccess();
+  const batchId = `fo-batch-${crypto.randomUUID()}`;
+  const outcomes = new Map();
+  const traceBody = policy => ({ ...body, ...pending.refs[policy.id], receivedAt: pending.receivedAt,
+    batchId, batchPolicyCount: policies.length, mergedSignals: pending.count });
+  try {
+    if (policies.length) {
+      const target = await jira.readIssue(key, ['project', 'issuelinks', ...new Set(policies.map(policy => policy.targetFieldId))]);
+      const shared = sharedReads(jira, target, key);
+      const needsDone = policies.some(policy => policy.skipDoneTargets);
+      const notDone = !needsDone || await jira.evaluate(key, "issue.status.category.key != 'done'");
+      const fields = {}, owners = new Set();
+      for (const policy of policies) {
+        // Independent owners of the same field are invalid even if their current
+        // values happen to match. Never let ordering silently decide ownership.
+        if (owners.has(policy.targetFieldId)) throw permanentError('Conflicting target field owners; consolidated write cancelled.');
+        owners.add(policy.targetFieldId);
+        if (policy.skipDoneTargets && !notDone) { outcomes.set(policy.id, 'skipped-done'); continue; }
+        let result;
+        try { result = await calculateTarget(policy, key, shared); }
+        catch (error) { if (error.retryable === undefined) error.retryable = false; throw error; }
+        if (result.current === result.value) { outcomes.set(policy.id, 'unchanged'); continue; }
+        fields[policy.targetFieldId] = result.value;
+        outcomes.set(policy.id, pending.refs[policy.id].restore ? 'restored' : 'changed');
+      }
+      if (Object.keys(fields).length) {
+        const metadata = await jira.editmeta(key);
+        for (const fieldId of Object.keys(fields)) {
+          if (metadata.fields?.[fieldId]?.schema?.type !== 'number') throw permanentError('Target is not an editable numeric field in this context; consolidated write cancelled.');
+        }
+        // Fresh Boolean guards and lifecycle checks are intentionally not cached.
+        // Abort the complete write if any member changed while calculating.
+        if (needsDone && notDone && !await jira.evaluate(key, "issue.status.category.key != 'done'")) {
+          const error = new Error('Target status changed during calculation; retrying consolidated write.'); error.retryable = true; throw error;
+        }
+        const scopeExpression = policies.map(policy => `${JSON.stringify(policy.projectIds)}.includes(issue.project.id + '')`).join(' && ');
+        if (!await jira.evaluate(key, scopeExpression)) throw permanentError('Target moved outside policy scope; consolidated write cancelled.');
+        const latest = await kvs.get('field-policies:v1') || [];
+        if (policies.some(policy => !latest.some(item => item.id === policy.id && item.status === 'active' && item.revision === policy.revision && (item.activatedAt || '') === (policy.activatedAt || '')))) {
+          for (const policy of policies) outcomes.set(policy.id, 'cancelled');
+        } else {
+          // A single Jira edit carries all changed fields. No field is written
+          // until every participating calculation and editable-field check passed.
+          await jira.writeFields(key, fields);
+        }
+      }
+      for (const policy of policies) {
+        const outcome = outcomes.get(policy.id);
+        await recordRelationshipRun(policy, traceBody(policy), key, outcome, started, jira.requests(), !['changed', 'restored'].includes(outcome));
+      }
+    }
+    await kvs.delete(storageKey);
+  } catch (error) {
+    for (const policy of policies) await recordRelationshipRun(policy, traceBody(policy), key, 'error', started, jira.requests(), false, error.message);
+    // API transients and storage/checkpoint failures must keep the dirty record
+    // and retry. A permanent calculation/API failure is visible and a later event
+    // can start a fresh batch. Unknown failures are not silently discarded.
+    if (error.retryable !== false) throw error;
+    await kvs.delete(storageKey);
+  }
+}
+
 export async function runRelationshipJob({ body }) {
-  const jobStartedAt = Date.now();
-  body = { ...body, jobStartedAt };
+  body = { ...body, jobStartedAt: Date.now() };
   const policies = (await kvs.get('field-policies:v1') || []).filter(policy => policy.status === 'active' && policy.behaviorType === 'relationship');
+  if (body.flushTarget) return flushTarget(body, policies);
+  const jira = jiraAccess(), routes = new Map();
   for (const policy of policies) {
     if (body.policyId && (policy.id !== body.policyId || policy.revision !== body.policyRevision)) continue;
     const plan = policy.runtime.plan;
@@ -138,55 +257,31 @@ export async function runRelationshipJob({ body }) {
     if (isLink ? !(plan.linkTypeId === body.linkTypeId && ((source && plan.targetProjectIds.includes(body.destinationProjectId)) || (target && plan.sourceProjectIds.includes(body.destinationProjectId)))) : !(source || target)) continue;
     const isUpdate = body.eventType === 'avi:jira:updated:issue';
     if (isUpdate && !(source && plan.sourceFieldIds.some(id => body.changedFields.includes(id))) && !(target && plan.targetFieldIds.some(id => body.changedFields.includes(id)))) continue;
-    const started = Date.now(), jira = jiraAccess();
+    const started = Date.now();
     try {
-      // Structural events recalculate the bounded target scope: deletion payloads
-      // cannot reliably reveal old parents/links. This covers both old and new totals.
       const structural = !isUpdate || body.changedFields.some(id => ['parent', 'issuetype', 'project'].includes(id));
       let targets;
-      if (body.targetKey) targets = [{ key: body.targetKey }];
+      if (body.targetKey) targets = [{ key: body.targetKey }]; // Drain pre-upgrade jobs safely.
       else if (structural) {
-        // Page discovery and target evaluation are separate jobs. A large project
-        // does not exhaust one invocation's request/time budget or cap its scope.
-        const page = await jira.searchTargetPage(`project in (${plan.targetProjectIds.map(quote).join(',')}) ORDER BY key`, body.nextPageToken);
+        const signature = JSON.stringify([plan.targetProjectIds, body.nextPageToken]);
+        if (!routes.has(signature)) routes.set(signature, jira.searchTargetPage(`project in (${plan.targetProjectIds.map(quote).join(',')}) ORDER BY key`, body.nextPageToken));
+        const page = await routes.get(signature);
         targets = page.targets;
-        for (const item of targets) await pushJob({ ...body, policyId: policy.id, policyRevision: policy.revision, targetKey: item.key, nextPageToken: undefined });
         if (page.nextPageToken) await pushJob({ ...body, policyId: policy.id, policyRevision: policy.revision, nextPageToken: page.nextPageToken });
-        if (!targets.length) await recordRelationshipRun(policy, body, body.key, 'no-targets', started, jira.requests(), true);
-        continue;
-      }
-      else {
-        targets = source ? (await traceRelationshipTargets(plan, body.key, jira)).targets : [];
+      } else {
+        if (source) {
+          const signature = JSON.stringify([plan.sourceProjectIds, plan.targetProjectIds, plan.linkTypeId, plan.relatedIssueTypeIds, plan.hierarchyDepth, plan.maxTargets, body.key]);
+          if (!routes.has(signature)) routes.set(signature, traceRelationshipTargets(plan, body.key, jira));
+          targets = [...(await routes.get(signature)).targets];
+        } else targets = [];
         if (target && (policy.protect || policy.skipDoneTargets)) targets.push({ key: body.key });
       }
-      if (!body.targetKey) {
-        const uniqueTargets = [...new Set(targets.map(item => item.key))];
-        // The discovery job already holds the shared write lock. Evaluate its
-        // first target here so related policies need no extra queue round trip.
-        // Fan-out remains bounded: all additional targets use separate jobs.
-        for (const key of uniqueTargets.slice(1)) await pushJob({ ...body, policyId: policy.id, policyRevision: policy.revision, targetKey: key });
-        targets = uniqueTargets.slice(0, 1).map(key => ({ key }));
-      }
+      for (const key of [...new Set(targets.map(item => item.key))]) await scheduleTarget(key, policy, body);
       if (!targets.length) await recordRelationshipRun(policy, body, body.key, 'no-targets', started, jira.requests(), true);
-      for (const key of [...new Set(targets.map(item => item.key))]) {
-        if (policy.skipDoneTargets && !await jira.evaluate(key, "issue.status.category.key != 'done'")) { await recordRelationshipRun(policy, body, key, 'skipped-done', started, jira.requests(), true); continue; }
-        const result = await calculateTarget(policy, key, jira);
-        if (result.current === result.value) { await recordRelationshipRun(policy, body, key, 'unchanged', started, jira.requests(), true); continue; }
-        // Recheck lifecycle immediately before writing. No stored stale revision
-        // may continue after a deactivation or edit observed by the worker.
-        const latest = (await kvs.get('field-policies:v1') || []).find(item => item.id === policy.id);
-        if (latest?.status !== 'active' || latest.revision !== policy.revision) break;
-        const metadata = await jira.editmeta(key);
-        if (metadata.fields?.[policy.targetFieldId]?.schema?.type !== 'number') throw new Error('Target is not an editable numeric field in this context.');
-        if (policy.skipDoneTargets && !await jira.evaluate(key, "issue.status.category.key != 'done'")) continue;
-        await jira.write(key, policy.targetFieldId, result.value);
-        await recordRelationshipRun(policy, body, key, policy.protect && body.key === key && body.changedFields.includes(policy.targetFieldId) ? 'restored' : 'changed', started, jira.requests());
-      }
     } catch (error) {
       await recordRelationshipRun(policy, body, body.key, 'error', started, jira.requests(), false, error.message);
-      // Throw so Forge retries transient API/search failures. Every retry reads
-      // current values again and suppresses already-applied writes.
-      if (error.retryable) throw error;
+      // Storage and dispatch errors must retry, or dirty work could be stranded.
+      if (error.retryable !== false) throw error;
     }
   }
 }
@@ -194,6 +289,7 @@ export async function runRelationshipJob({ body }) {
 async function recordRelationshipRun(policy, body, key, outcome, started, requests, debugOnly = false, message = '') {
   const record = { traceId: `fo-rel-${crypto.randomUUID()}`, policyId: policy.id, policyName: policy.name,
     workItemKey: key, sourceKey: body.key, outcome, kind: 'runtime', revision: policy.revision,
+    ...(body.batchId ? { batchId: body.batchId, batchPolicyCount: body.batchPolicyCount, mergedSignals: body.mergedSignals, requestCountScope: 'shared-target-batch' } : {}),
     changedFieldIds: body.changedFields || [], message: String(message).slice(0, 200), eventType: body.eventType, createdAt: new Date().toISOString(), durationMs: Date.now() - started, jiraRequests: requests,
     ...(Number.isFinite(body.receivedAt) ? { sinceIngressMs: Date.now() - body.receivedAt, beforeJobMs: body.jobStartedAt - body.receivedAt } : {}) };
   try {

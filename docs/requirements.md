@@ -137,6 +137,21 @@ Process large target scopes in pages/queued work; the **ten-row preview limit mu
 
 The current handler still reads the saved-policy collection and selects relevant policies; a fully indexed no-scan runtime is pending. Queued relationship/population work uses multiple invocations. Do not claim one invocation per entire source event or guaranteed zero cost.
 
+### R17 — Consolidated target updates and scalable processing
+
+Goal: timely convergence of configured fields under ordinary edits and bursts, with work proportional to affected targets and distinct calculations rather than repeated full rollups per source event. This is not a one-second SLA.
+
+- Group affected active numeric relationship policies by target issue; calculate the complete participating batch before sending one Jira edit containing only changed fields.
+- Share identical target, hierarchy and routing reads within each job. Keep status/value filtering in Jira and never reuse data across runs as if fresh.
+- Consolidate pending signals for a target in a durable record. No assumed FIFO delivery, read/modify/write outside the serialized worker, or lost updates when a new event arrives during calculation.
+- Validate policy revision and activation identity, ownership, target scope, numeric editability and Done guards before writing. Failed calculations prevent the batch write; retries reread current values and suppress equivalent writes.
+- Keep manifest filters, narrow reads and existing pilot guards. Keep population consent and processing separate; this feature does not implicitly populate other policies or activate drafts.
+- Record a shared batch ID, participating policy count, merged signal count, and ingress-to-result timing. Shared batch request counts must not be summed once per policy as separate API charges.
+- Acceptance: distinct source edits accumulated before a flush produce one final calculation/write for that target; two different target fields appear in one write; late events converge through follow-up; duplicate/reordered jobs, dispatch/storage/API failures and deactivation do not produce stale writes.
+- Measure live single-event latency and 100-source bursts (same and different targets), including p50/p95 completion and request/storage counts. Queue scheduling, event delivery and Jira search freshness prevent a guaranteed batch size or fixed response time.
+
+Implementation: durable target consolidation and combined numeric rollup writes are implemented and regression-tested. Ingress/routing still processes individual events, and all relationship/population jobs retain the shared installation writer lock. Independent-target parallelism, upstream event batching, automatic recovery after exhausted queue retention and live capacity certification remain pending. Field assessments and initial population are not merged into these batches.
+
 ## 7. Optional initial population
 
 ### R12 — Choice and consent
@@ -241,3 +256,5 @@ Every functional, storage, security, runtime, lifecycle or quota change updates 
 BUG-001: ordinary relationship updates now calculate the first discovered target for each affected policy inside the existing serialized discovery job. Additional targets and structural scans retain paginated queue jobs. Relationship enqueue operations no longer add an artificial two-second delay. The shared writer lock (including population), revision checks, Done guards, filters and unchanged-write suppression remain. Trace records add `sinceIngressMs` and `beforeJobMs`; these start at Forge ingress, not at the original Jira edit, and continuation timing includes prior processing. Live latency improvement remains to be verified after deployment.
 
 Verification update (2026-09-25): latency simplification deployed privately as development **5.10.0**. All **61 tests**, ESLint and Forge lint passed. Earlier 5.9.0/58-test references describe the reconstruction baseline; live latency comparison remains pending.
+
+R17 release evidence (2026-09-25): deployed privately to development as **5.11.0**. All **73 automated tests**, ESLint and Forge lint passed. The controlled 100-distinct-source pending burst produced one target calculation/write; two policies produced one fields-map edit. Live combined-history and burst-capacity acceptance remain pending. GitHub push blocked by automatic approval review pending exact destination/payload confirmation.

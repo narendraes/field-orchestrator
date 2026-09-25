@@ -9,7 +9,7 @@ A private Forge app for no-code Jira/JPD field assessments, linked-work numeric 
 - [Runtime architecture](docs/runtime-architecture.md): manifest gates, modules, schemas, storage, queues and recovery contracts.
 - [Historical notes](docs/history/): superseded requirements/architecture retained for context, not current specifications.
 
-Current application baseline: private development **5.9.0**, source **5f872dd**. Automatic numeric rollups have user-confirmed live evidence for one Story-to-JPD update. Optional population and Done protection are implemented; their live acceptance remains pending. Hierarchy inheritance is preview-only; ordered decisions and external integrations remain pending/deferred as specified.
+Current application release: private development **5.11.0**. Reconstruction baseline: **5.9.0 / 5f872dd**. Automatic numeric rollups have user-confirmed live evidence for one Story-to-JPD update. Optional population and Done protection are implemented; their live acceptance remains pending. Hierarchy inheritance is preview-only; ordered decisions and external integrations remain pending/deferred as specified.
 
 ## Work locally
 
@@ -22,7 +22,7 @@ npm run lint
 forge lint
 ```
 
-The baseline suite contains 58 automated tests. UI uses native Forge UI Kit. Runtime code lives under `src/runtime/`, admin resolvers under `src/resolvers/`, and the editor in `src/frontend/index.jsx`.
+The current suite contains 73 automated tests. UI uses native Forge UI Kit. Runtime code lives under `src/runtime/`, admin resolvers under `src/resolvers/`, and the editor in `src/frontend/index.jsx`.
 
 ## Deploy and recover
 
@@ -39,3 +39,5 @@ Every functional change updates requirements, runtime architecture as needed, an
 See [CONTRIBUTING.md](CONTRIBUTING.md) for picking up unfinished work, proposing new features, and integrating GitHub changes. Record discoveries and fixes in [the bug register](docs/bugs.md). GitHub issue and pull-request templates are included; repository access remains private and owner-controlled.
 
 Verification update (2026-09-25): latency simplification deployed privately as development **5.10.0**. All **61 tests**, ESLint and Forge lint passed. Earlier 5.9.0/58-test references describe the reconstruction baseline; live latency comparison remains pending.
+
+Relationship rollups now consolidate pending signals per target and combine changed fields in one Jira edit (R17). See requirements and runtime architecture for safety contracts and remaining live scale acceptance. This does not change initial-population consent or private distribution.

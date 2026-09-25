@@ -41,3 +41,9 @@ Removed relationship queue delays and the extra queue hop for each policy's firs
 BUG-001 status: deployed for live verification in private development 5.10.0. All 61 tests, ESLint and Forge lint passed. No measured post-deployment speed claim yet.
 
 Live acceptance (2026-09-25, development 5.10.0): a five-point Story moved to In Progress. Screenshot confirms In Progress 10→15 and To Do 81→76 on the same target. Logs confirm both status-triggered writes in one worker invocation, 2.704 seconds apart (previous observed gap 25.468 seconds). Completion from Forge ingress was 5.978 and 8.681 seconds; pre-job time 2.058 seconds. This is one successful sample, not a throughput guarantee or Jira-edit-to-write measurement. Post-change protection and load tests remain pending.
+
+### BUG-001 follow-up — R17 consolidation
+
+Implemented one combined target edit for participating numeric rollup fields, shared reads and durable pending-signal merging. This supersedes separate writes observed in 5.10. Live verification and burst-capacity measurement remain pending; regression results and deployment recorded below.
+
+R17 release evidence (2026-09-25): deployed privately to development as **5.11.0**. All **73 automated tests**, ESLint and Forge lint passed. The controlled 100-distinct-source pending burst produced one target calculation/write; two policies produced one fields-map edit. Live combined-history and burst-capacity acceptance remain pending. GitHub push blocked by automatic approval review pending exact destination/payload confirmation.

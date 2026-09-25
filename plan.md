@@ -117,7 +117,7 @@ Dependencies: P2–P3. Exit: actual configured Jira/JPD targets update automatic
 - [x] P4.11 — User confirmed one real Story edit updated a JPD target field and history.
 - [ ] P4.12 — Complete live tests for entering/leaving filters, empty points, creation, old/new parent totals, deletion and both link orientations.
 - [ ] P4.13 — Cover moves into/out of unindexed projects and missed events through a supported reconciliation design.
-- [ ] P4.14 — Add durable event/target coalescing and idempotency records where needed; prove behavior under duplicate, reordered and concurrent source changes.
+- [ ] P4.14 — Target coalescing and generation guards implemented under R17; complete live reordered/concurrent/burst acceptance and exhausted-retention recovery before closing this broader task.
 - [ ] P4.15 — Replace global active-policy scans with direct dependency routing without weakening manifest gates.
 - [ ] P4.16 — Remove/expand the 50-route, 500-candidate and five-policy pilot guards only after implementing bounded continuations and measuring capacity. These are not permanent user requirements.
 - [ ] P4.17 — Measure queue self-continuation, backlog, retention and API retry behavior against current Forge limits; add recovery for exhausted delivery.
@@ -240,3 +240,16 @@ BUG-001: ordinary relationship updates now calculate the first discovered target
 Verification update (2026-09-25): latency simplification deployed privately as development **5.10.0**. All **61 tests**, ESLint and Forge lint passed. Earlier 5.9.0/58-test references describe the reconstruction baseline; live latency comparison remains pending.
 
 Live acceptance (2026-09-25, development 5.10.0): a five-point Story moved to In Progress. Screenshot confirms In Progress 10→15 and To Do 81→76 on the same target. Logs confirm both status-triggered writes in one worker invocation, 2.704 seconds apart (previous observed gap 25.468 seconds). Completion from Forge ingress was 5.978 and 8.681 seconds; pre-job time 2.058 seconds. This is one successful sample, not a throughput guarantee or Jira-edit-to-write measurement. Post-change protection and load tests remain pending.
+
+## R17 delivery — consolidated rollup updates
+
+- [x] P4.19 — Group numeric rollups per target and send changed fields in one Jira edit; share routing, target, metadata and identical hierarchy reads.
+- [x] P4.20 — Persist pending target generations under the existing shared worker lock; merge policy signals and safely retry queue/storage/API failures.
+- [x] P4.21 — Validate whole batches, reject competing owners, recheck lifecycle/scope/Done, preserve protection and suppress unchanged writes.
+- [x] P6.12 — Automated 100-distinct-source pending burst, combined write, duplicates, late events, failed members, API retry and checkpoint tests.
+- [ ] P6.13 — Live two-field history acceptance and 100-source same/different-target load measurements; record p50/p95, requests, KVS use and failure recovery.
+- [ ] P4.22 — Evaluate independent-target concurrency and upstream routing consolidation with population/assessment coordination before relaxing the shared lock.
+
+Live scaling evidence must distinguish reduced writes from remaining per-event ingress/routing cost. No fixed one-second response or guaranteed single write for an entire live burst is claimed. Population remains opt-in and outside these batches.
+
+R17 release evidence (2026-09-25): deployed privately to development as **5.11.0**. All **73 automated tests**, ESLint and Forge lint passed. The controlled 100-distinct-source pending burst produced one target calculation/write; two policies produced one fields-map edit. Live combined-history and burst-capacity acceptance remain pending. GitHub push blocked by automatic approval review pending exact destination/payload confirmation.
