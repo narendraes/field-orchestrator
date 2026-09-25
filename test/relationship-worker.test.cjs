@@ -6,12 +6,13 @@ const vm=require('node:vm');
 const {randomUUID}=require('node:crypto');
 async function harness(targetCount=1){
  const context=vm.createContext({console:{info(){},warn(){}},crypto:{randomUUID}}),store=new Map(),writes=[],queued=[];
- let points=11,target=3,linked=true,editable=true,matching=true;
+ let points=11,target=3,linked=true,editable=true,matching=true,eligible=true;
  const targetValues=new Map();
  const policy={id:'p',revision:'r',name:'Rollup',status:'active',behaviorType:'relationship',projectIds:['1'],sourceProjectIds:['2'],targetFieldId:'customfield_2',sourceFieldId:'customfield_1',aggregation:'sum',filters:[],runtime:{plan:{sourceProjectIds:['2'],targetProjectIds:['1'],sourceFieldIds:['customfield_1','status','parent','issuetype','project'],targetFieldIds:['customfield_2'],linkTypeId:'7',relatedIssueTypeIds:['9'],hierarchyDepth:1,maxTargets:50}}};store.set('field-policies:v1',[policy]);
  const requestJira=async(url,options={})=>{
  let data={};
- if(url.includes('/search/jql')){
+ if(url.includes('/expression/evaluate')){assert.match(JSON.parse(options.body).expression,/issue.status.category.key/);data={value:eligible};}
+ else if(url.includes('/search/jql')){
   const q=JSON.parse(options.body).jql;
   if(q.startsWith('project in')){
    const offset=Number(JSON.parse(options.body).nextPageToken||0),end=Math.min(offset+25,targetCount);
@@ -35,7 +36,7 @@ async function harness(targetCount=1){
  await mod.namespace.runRelationshipJob(event);
  let count=0;
  while(queued.length){if(++count>1000)throw new Error('Queue did not drain');await mod.namespace.runRelationshipJob({body:queued.shift().body});}
- }},raw:mod.namespace,policy,store,writes,queued,setPoints:v=>points=v,setTarget:v=>{target=v;targetValues.clear();},unlink:()=>linked=false,deny:()=>editable=false,setMatching:v=>matching=v};
+ }},raw:mod.namespace,policy,store,writes,queued,setPoints:v=>points=v,setTarget:v=>{target=v;targetValues.clear();},unlink:()=>linked=false,deny:()=>editable=false,setEligible:v=>eligible=v,setMatching:v=>matching=v};
 }
 const update={body:{eventType:'avi:jira:updated:issue',projectId:'2',key:'ABC-1',changedFields:['customfield_1']}};
 test('story points update writes target once; duplicate event is a no-op',async()=>{const h=await harness();await h.m.runRelationshipJob(update);assert.deepEqual(h.writes,[11]);await h.m.runRelationshipJob(update);assert.deepEqual(h.writes,[11]);});
@@ -69,4 +70,10 @@ test('queued target job from an old revision cannot write',async()=>{
  const h=await harness();await h.raw.runRelationshipJob(update);assert.equal(h.writes.length,0);
  h.policy.revision='new';h.store.set('field-policies:v1',[h.policy]);
  await h.raw.runRelationshipJob({body:h.queued[0].body});assert.equal(h.writes.length,0);
+});
+
+test('future Done-target protection skips writes and reopening can recalculate',async()=>{
+ const h=await harness();h.policy.skipDoneTargets=true;h.store.set('field-policies:v1',[h.policy]);h.setEligible(false);
+ await h.m.runRelationshipJob(update);assert.equal(h.writes.length,0);
+ h.setEligible(true);await h.m.runRelationshipJob(update);assert.deepEqual(h.writes,[11]);
 });

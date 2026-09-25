@@ -18,7 +18,7 @@ export function compileRelationshipPlan(policy) {
     targetFieldId: policy.targetFieldId, linkTypeId: String(policy.linkTypeId),
     sourceProjectIds: unique(policy.sourceProjectIds), targetProjectIds: unique(policy.projectIds),
     relatedIssueTypeIds: unique(policy.relatedIssueTypeIds), hierarchyDepth: policy.hierarchyDepth,
-    sourceFieldIds, targetFieldIds: policy.protect ? [policy.targetFieldId] : [],
+    sourceFieldIds, targetFieldIds: unique([...(policy.protect ? [policy.targetFieldId] : []), ...(policy.skipDoneTargets ? ['status'] : [])]),
     // Link events resolve source-side project properties. Index both endpoint
     // scopes so either direction of the relationship is covered.
     linkProjectIds: unique([...policy.sourceProjectIds, ...policy.projectIds]),

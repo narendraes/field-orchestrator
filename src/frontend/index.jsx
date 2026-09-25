@@ -100,7 +100,7 @@ const blankPolicy = () => ({
   aggregation: 'copy', conditionMatch: 'AND',
   conditions: [{ fieldId: '', operator: 'equals', value: '' }],
   filters: [],
-  resultValue: '', protect: false, status: 'draft'
+  resultValue: '', protect: false, skipDoneTargets: false, status: 'draft'
 });
 
 const hasCurrentValidation = policy => Boolean(policy.revision && policy.lastValidatedRevision === policy.revision && policy.lastValidatedKey);
@@ -120,6 +120,19 @@ function App() {
   const [diagnostics, setDiagnostics] = useState(null);
   const [diagnosticBusy, setDiagnosticBusy] = useState(false);
   const [activationReview, setActivationReview] = useState(null);
+  const [populationChoice, setPopulationChoice] = useState({ mode: 'future', keys: '', from: '', to: '', includeDone: false });
+  const [population, setPopulation] = useState(null);
+  const [populationBusy, setPopulationBusy] = useState(false);
+  const choosePopulation = patch => { setPopulationChoice(current => ({ ...current, ...patch })); setPopulation(null); };
+  async function populationAction(action) {
+    setPopulationBusy(true); setError('');
+    try {
+      const result = await invoke(action, action === 'preparePopulation' ? { id: draft.id, selection: populationChoice } : { id: draft.id, populationId: population?.id });
+      setPopulation(result);
+      if (result?.phase === 'ready' && result.revision === draft.revision && draft.status !== 'active') setActivationReview(await invoke('reviewPolicyActivation', { id: draft.id }));
+    } catch (exception) { setError(exception.message || 'Could not update population progress.'); }
+    finally { setPopulationBusy(false); }
+  }
   const [draft, setDraft] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -153,7 +166,7 @@ function App() {
   const selectValue = (items, value) => items.find(item => item.value === value) || null;
   const change = patch => {
     if (saving || previewing || draft?.status === 'active') return;
-    setActivationReview(null); setPreview(null); setRoutingResult(null);
+    setActivationReview(null); setPreview(null); setRoutingResult(null); setPopulation(null);
     setDraft(current => ({ ...current, ...patch, lastValidatedRevision: null }));
   };
 
@@ -311,9 +324,10 @@ function App() {
   async function setActivation(policy, active) {
     setSaving(true); setError(''); setNotice('');
     try {
-      const updated = await invoke(active ? 'activatePolicy' : 'deactivatePolicy', active ? { id: policy.id, policyRevision: activationReview?.policyRevision, reviewToken: activationReview?.reviewToken } : { id: policy.id });
+      const updated = await invoke(active ? 'activatePolicy' : 'deactivatePolicy', active ? { id: policy.id, policyRevision: activationReview?.policyRevision, reviewToken: activationReview?.reviewToken, ...(populationChoice.mode !== 'future' && population?.phase === 'ready' ? { populationId: population.id } : {}) } : { id: policy.id });
       setDraft(current => current?.id === updated.id ? updated : current);
       setActivationReview(null);
+      if (active && population?.id && populationChoice.mode !== 'future') setPopulation(await invoke('populationStatus', { populationId: population.id }));
       setPolicies(current => current.map(item => item.id === updated.id ? updated : item));
       setNotice(active
         ? `“${updated.name}” is active. Qualifying Jira updates will now enforce it in the selected spaces.`
@@ -429,7 +443,7 @@ function App() {
     const problem = validate();
     if (problem) { setError(problem); return; }
     if (draft.status === 'active') return;
-    setSaving(true); setError(''); setNotice(''); setActivationReview(null);
+    setSaving(true); setError(''); setNotice(''); setActivationReview(null); setPopulation(null);
     try {
       // Pass the saved snapshot directly; React state still holds the old revision.
       const saved = await invoke('savePolicy', draft);
@@ -448,6 +462,14 @@ function App() {
     const metrics = { startedAt: Date.now(), jiraRequests: 0 };
     const traceId = `fo-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const showPreview = async result => {
+      if (!result.error && draft.skipDoneTargets && result.affectedKey) {
+        metrics.jiraRequests += 1;
+        const response = await requestJira('/rest/api/3/expression/evaluate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expression: "issue.status.category.key != 'done'", context: { issue: { key: result.affectedKey } } }) });
+        if (!response.ok) throw new Error('Could not check Done-target protection.');
+        const guard = await response.json();
+        if (typeof guard.value !== 'boolean') throw new Error('Done-target check returned an invalid result.');
+        if (!guard.value) result = { ...result, skippedDone: true, wouldChange: false, computedValue: result.currentValue };
+      }
       const validationMetrics = {
         durationMs: Date.now() - metrics.startedAt,
         jiraRequests: metrics.jiraRequests
@@ -566,6 +588,7 @@ function App() {
   }
 
   function start(policy) {
+    setPopulation(null); setPopulationChoice({ mode: 'future', keys: '', from: '', to: '', includeDone: false });
     setRoutingResult(null); setRoutingKey('');
     setActivationReview(null);
     setDraft(policy ? { ...policy, conditions: policy.conditions.map(item => ({ ...item })), filters: (policy.filters || []).map(item => ({ ...item })) } : blankPolicy());
@@ -698,6 +721,8 @@ function App() {
       <Box xcss={cardStyles}>
         <Stack space="space.150">
           <Inline alignBlock="center" space="space.100"><Lozenge appearance="success">Step 3</Lozenge><Heading as="h3">Enforcement and review</Heading></Inline>
+          <Checkbox label="Do not update the target field when the target work item is Done" isChecked={draft.skipDoneTargets === true} onChange={event => change({ skipDoneTargets: event.target.checked })} />
+          <HelperMessage>This applies to initial population and future updates, including restoration after an external edit. It checks the target work item's status category, not the related source items.</HelperMessage>
           <Checkbox label="Protect the computed target from external changes" isChecked={draft.protect} onChange={event => change({ protect: event.target.checked })} />
           <HelperMessage>For active assessment policies, an external target edit is restored when the configured conditions still match. If they do not match, the app leaves the value unchanged.</HelperMessage>
           <SectionMessage title="Policy summary" appearance="information"><Text>{summary(draft)}</Text><Text>Scope: {draft.projectIds.map(projectName).join(', ') || 'choose at least one space'}.</Text></SectionMessage>
@@ -710,6 +735,7 @@ function App() {
           {preview?.error && <SectionMessage title="Validation could not run" appearance="error"><Text>{preview.error}</Text></SectionMessage>}
           {preview && !preview.error && <Stack space="space.150">
             <SectionMessage title={preview.wouldChange ? 'Validation passed — value would change' : 'Validation passed — no change needed'} appearance={preview.wouldChange ? 'warning' : 'success'}>
+              {preview.skippedDone && <Text>The target is Done. This policy leaves its target field unchanged.</Text>}
               <Text>Tested: {preview.sourceKey}. Affected work item: {preview.affectedKey}.</Text>
               {preview.type === 'relationship' && <Text>Found {preview.linkedCount} matching links and {preview.rootCount} matching related roots. Traversed {preview.traversedCount} keys with minimal fields; Jira returned {preview.candidates.length} work items matching the configured filters.</Text>}
               {preview.type === 'relationship' && preview.aggregation !== 'count' && preview.candidates.length > 0 && preview.contributingCount === 0 && <Text>The matching work items have no source-field value, so the calculated sum is 0.</Text>}
@@ -727,13 +753,35 @@ function App() {
           {preview?.metrics && <SectionMessage title="Validation usage" appearance="information"><Text>Response time: {(preview.metrics.durationMs / 1000).toFixed(2)} seconds. Jira REST requests: {preview.metrics.jiraRequests}. Trace ID: {preview.traceId}.</Text><Text>{preview.traceRetained === true ? 'This trace is retained in Executions and emitted to Forge logs.' : preview.traceRetained === null ? 'The result is complete; its trace is being retained in the background.' : preview.traceFailed ? 'The result is complete, but its trace could not be retained.' : 'Save the policy before testing to retain its trace in Executions and Forge logs.'}</Text><Text>Estimated Forge charge: $0.00 while this app remains within its monthly free allowances. A retained test uses one resolver invocation, two KVS reads, two KVS writes, and one small log record; it does not invoke the policy event runtime or write Jira data.</Text></SectionMessage>}
         </Stack>
       </Box>
+      <Box xcss={cardStyles}><Stack space="space.150">
+        <Heading as="h3">Existing target values</Heading>
+        {draft.status !== 'active' && <Stack space="space.100">
+          <Label labelFor="population-mode">When activating this policy</Label>
+          <Select inputId="population-mode" isDisabled={saving || previewing || populationBusy} options={[choice('Future changes only', 'future'), choice('Populate selected target keys', 'keys'), choice('Populate targets created in a date range', 'dates'), choice('Populate all eligible targets', 'all')]} value={selectValue([choice('Future changes only', 'future'), choice('Populate selected target keys', 'keys'), choice('Populate targets created in a date range', 'dates'), choice('Populate all eligible targets', 'all')], populationChoice.mode)} onChange={option => choosePopulation({ mode: option.value })} />
+          {populationChoice.mode === 'future' ? <Text>Activation will not populate existing values. Future qualifying changes can update them according to this policy.</Text> : <Stack space="space.100">
+            {populationChoice.mode === 'keys' && <Box><Label labelFor="population-keys">Target work-item keys</Label><Textfield id="population-keys" isDisabled={populationBusy} placeholder="ABC-123, ABC-456" value={populationChoice.keys} onChange={event => choosePopulation({ keys: event.target.value })} /><HelperMessage>Up to 100 keys per selection. Keys outside the policy scope are excluded.</HelperMessage></Box>}
+            {populationChoice.mode === 'dates' && <Inline grow="fill" space="space.150"><Box><Label labelFor="population-from">Target created from (YYYY-MM-DD)</Label><Textfield id="population-from" isDisabled={populationBusy} value={populationChoice.from} onChange={event => choosePopulation({ from: event.target.value })} /></Box><Box><Label labelFor="population-to">Target created through (YYYY-MM-DD)</Label><Textfield id="population-to" isDisabled={populationBusy} value={populationChoice.to} onChange={event => choosePopulation({ to: event.target.value })} /></Box></Inline>}
+            <Checkbox label="Include target work items in the Done status category for this population" isDisabled={populationBusy || draft.skipDoneTargets === true} isChecked={populationChoice.includeDone && !draft.skipDoneTargets} onChange={event => choosePopulation({ includeDone: event.target.checked })} />
+            <Text>Only the configured target field may change. Other fields stay unchanged. Equal values are skipped. Future updates follow the separate Done-target protection setting above.</Text>
+            <Button isDisabled={saving || previewing || populationBusy || !activationReview || !hasCurrentValidation(draft)} onClick={() => populationAction('preparePopulation')}>Prepare target list</Button>
+            <HelperMessage>Save &amp; validate first, then prepare the list. Preparation reads targets without changing them. Review the count before activating.</HelperMessage>
+          </Stack>}
+        </Stack>}
+        {(population || draft.status === 'active') && <ButtonGroup><Button isDisabled={populationBusy} onClick={() => populationAction('populationStatus')}>Refresh population progress</Button>{population?.phase === 'error' && <Button isDisabled={populationBusy} onClick={() => populationAction('retryPopulation')}>Retry remaining</Button>}</ButtonGroup>}
+        {population && <SectionMessage title={`Population: ${population.phase}`} appearance={population.phase === 'error' ? 'error' : population.phase === 'ready' || population.phase === 'complete' ? 'success' : 'information'}>
+          <Text>{population.total} targets in the prepared list. Updated: {population.updated}; unchanged: {population.unchanged}; skipped: {population.skipped}; blocked: {population.phase === 'error' ? 1 : 0}.</Text>
+          {population.phase === 'ready' && <Text>Click Activate to process this fixed list. Scope, conditions and Done exclusions are checked again before each write. Preparation expires after one hour.</Text>}
+          {population.phase === 'error' && <Text>Paused at {population.currentKey || 'preparation'}: {population.error}. Retry resumes at the current position.</Text>}
+          {population.phase === 'running' && <Text>Processing in background batches. Deactivating the policy stops pending work; an in-flight write may finish.</Text>}
+        </SectionMessage>}
+      </Stack></Box>
       {draft.status === 'active' && <SectionMessage title="Active policy" appearance="success"><Text>Deactivate this policy before changing its configuration.</Text></SectionMessage>}
       {activationReview && <SectionMessage title="Ready to activate" appearance="success"><Text>Dependencies: {activationReview.dependencyFieldIds.map(fieldName).join(', ')}. New work items are included. {draft.behaviorType === 'relationship' ? 'Relationship requests depend on hierarchy size and target count; processing uses a serialized queue.' : 'Estimated Jira requests per assessment evaluation: 1–3.'}</Text><Text>Upstream policies: {activationReview.upstreamPolicies.join(', ') || 'None'}. Downstream policies: {activationReview.downstreamPolicies.join(', ') || 'None'}. Review expires after 15 minutes.</Text></SectionMessage>}
       {error && <SectionMessage title="Check the policy" appearance="error"><Text>{error}</Text></SectionMessage>}
       <ButtonGroup>
         <Button isDisabled={saving || previewing || draft.status === 'active'} onClick={save}>Save draft</Button>
         <Button appearance="primary" isDisabled={saving || previewing || draft.status === 'active'} onClick={runPreview}>Save & validate</Button>
-        {draft.status === 'active' ? <Button isDisabled={saving || previewing} onClick={() => setActivation(draft, false)}>Deactivate</Button> : <Button appearance="primary" isDisabled={saving || previewing || !activationReview || !hasCurrentValidation(draft)} onClick={() => setActivation(draft, true)}>Activate</Button>}
+        {draft.status === 'active' ? <Button isDisabled={saving || previewing} onClick={() => setActivation(draft, false)}>Deactivate</Button> : <Button appearance="primary" isDisabled={saving || previewing || populationBusy || !activationReview || !hasCurrentValidation(draft) || (populationChoice.mode !== 'future' && (population?.phase !== 'ready' || population?.revision !== draft.revision))} onClick={() => setActivation(draft, true)}>Activate</Button>}
         <Button isDisabled={saving || previewing} onClick={() => { setDraft(null); setError(''); setActivationReview(null); }}>Back to policies</Button>
       </ButtonGroup>
     </Stack> : page === 'Policies' ? <Stack space="space.200">

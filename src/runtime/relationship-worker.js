@@ -43,6 +43,11 @@ export function jiraAccess(asUser = false) {
   };
   return {
     requests: () => requests,
+    evaluate: async (key, expression) => {
+      const result = await request(route`/rest/api/3/expression/evaluate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expression, context: { issue: { key } } }) });
+      if (typeof result?.value !== 'boolean') throw new Error('Jira expression did not return a Boolean.');
+      return result.value;
+    },
     readIssue: (key, fields) => request(route`/rest/api/3/issue/${key}?fields=${fields.join(',')}`),
     editmeta: key => request(route`/rest/api/3/issue/${key}/editmeta`),
     searchTargetPage: async (jql, nextPageToken) => {
@@ -149,7 +154,7 @@ export async function runRelationshipJob({ body }) {
       }
       else {
         targets = source ? (await traceRelationshipTargets(plan, body.key, jira)).targets : [];
-        if (target && policy.protect) targets.push({ key: body.key });
+        if (target && (policy.protect || policy.skipDoneTargets)) targets.push({ key: body.key });
       }
       if (!body.targetKey) {
         for (const key of [...new Set(targets.map(item => item.key))]) await pushJob({ ...body, policyId: policy.id, policyRevision: policy.revision, targetKey: key });
@@ -158,6 +163,7 @@ export async function runRelationshipJob({ body }) {
       }
       if (!targets.length) await recordRelationshipRun(policy, body, body.key, 'no-targets', started, jira.requests(), true);
       for (const key of [...new Set(targets.map(item => item.key))]) {
+        if (policy.skipDoneTargets && !await jira.evaluate(key, "issue.status.category.key != 'done'")) { await recordRelationshipRun(policy, body, key, 'skipped-done', started, jira.requests(), true); continue; }
         const result = await calculateTarget(policy, key, jira);
         if (result.current === result.value) { await recordRelationshipRun(policy, body, key, 'unchanged', started, jira.requests(), true); continue; }
         // Recheck lifecycle immediately before writing. No stored stale revision
@@ -166,6 +172,7 @@ export async function runRelationshipJob({ body }) {
         if (latest?.status !== 'active' || latest.revision !== policy.revision) break;
         const metadata = await jira.editmeta(key);
         if (metadata.fields?.[policy.targetFieldId]?.schema?.type !== 'number') throw new Error('Target is not an editable numeric field in this context.');
+        if (policy.skipDoneTargets && !await jira.evaluate(key, "issue.status.category.key != 'done'")) continue;
         await jira.write(key, policy.targetFieldId, result.value);
         await recordRelationshipRun(policy, body, key, policy.protect && body.key === key && body.changedFields.includes(policy.targetFieldId) ? 'restored' : 'changed', started, jira.requests());
       }

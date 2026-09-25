@@ -108,3 +108,29 @@ test('failed project property write does not activate policy',async()=>{
  await assert.rejects(h.h.activatePolicy({payload:{id:p.id,...review}}),/failed \(403\)/);
  assert.notEqual(h.store.get('field-policies:v1')[0].status,'active');
 });
+
+test('future-only activation does not create a population run',async()=>{
+ const {h,p}=await ready(),review=await h.h.reviewPolicyActivation({payload:{id:p.id}});
+ await h.h.activatePolicy({payload:{id:p.id,...review}});
+ assert.equal([...h.store.keys()].some(key=>key.startsWith('population:')),false);
+});
+test('activation rejects foreign, stale and unprepared population runs',async()=>{
+ for(const patch of [{policyId:'other'},{revision:'old'},{phase:'preparing'}]){
+ const {h,p}=await ready(),review=await h.h.reviewPolicyActivation({payload:{id:p.id}});
+ const run={id:'pop',policyId:p.id,revision:p.revision,phase:'ready',expiresAt:Date.now()+60000,...patch};
+ h.store.set('population:v1:pop',run);h.store.set('population-current:v1:'+p.id,'pop');
+ await assert.rejects(h.h.activatePolicy({payload:{id:p.id,...review,populationId:'pop'}}));
+ assert.notEqual(h.store.get('field-policies:v1')[0].status,'active');
+ }
+});
+test('reviewed population starts only after policy activation',async()=>{
+ const {h,p}=await ready(),review=await h.h.reviewPolicyActivation({payload:{id:p.id}});
+ h.store.set('population:v1:pop',{id:'pop',policyId:p.id,revision:p.revision,phase:'ready',expiresAt:Date.now()+60000});h.store.set('population-current:v1:'+p.id,'pop');
+ await h.h.activatePolicy({payload:{id:p.id,...review,populationId:'pop'}});
+ assert.equal(h.store.get('field-policies:v1')[0].status,'active');assert.equal(h.store.get('population:v1:pop').phase,'running');
+});
+test('Done protection is compiled server-side and tracks status changes',async()=>{
+ const h=await harness(),p=await h.h.savePolicy({payload:{...draft,skipDoneTargets:true}});await validate(h,p);
+ const review=await h.h.reviewPolicyActivation({payload:{id:p.id}}),active=await h.h.activatePolicy({payload:{id:p.id,...review}});
+ assert.match(active.runtime.expression,/status.category.key != 'done'/);assert.ok(active.runtime.dependencyFieldIds.includes('status'));
+});

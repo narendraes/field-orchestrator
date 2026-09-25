@@ -51,6 +51,9 @@ modules:
     - key: relationship-consumer
       queue: relationship-jobs
       function: relationship-worker
+    - key: population-consumer
+      queue: population-jobs
+      function: population-worker
   function:
     - key: resolver
       handler: index.handler
@@ -60,6 +63,9 @@ modules:
       handler: index.enqueueRelationshipEvent
     - key: relationship-worker
       handler: index.runRelationshipJob
+      timeoutSeconds: 300
+    - key: population-worker
+      handler: index.runPopulationJob
       timeoutSeconds: 300
 resources:
   - key: main

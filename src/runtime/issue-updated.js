@@ -83,6 +83,14 @@ async function processPolicy(policy, event) {
     const nextValue = policy.runtime.compiledTargetValue;
     if (displayValue(currentValue) === displayValue(nextValue)) { await diagnostic(policy, event, 'unchanged', startedAt, jiraRequests); return false; }
 
+    if (policy.skipDoneTargets) {
+      jiraRequests += 1;
+      const eligible = await jiraJson(api.asApp().requestJira(route`/rest/api/3/expression/evaluate`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ expression: "issue.status.category.key != 'done'", context: { issue: { key: event.issue.key } } })
+      }), 'Done target check');
+      if (eligible?.value !== true) return false;
+    }
     jiraRequests += 1;
     await jiraJson(api.asApp().requestJira(route`/rest/api/3/issue/${event.issue.key}`, {
       method: 'PUT',

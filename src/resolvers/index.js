@@ -1,3 +1,4 @@
+import { createPopulation, readPopulation, latestPopulation, startPopulation, queuePopulation } from '../runtime/population';
 import Resolver from '@forge/resolver';
 import { projectDependencies, jiraAccess, calculateTarget, filterClause } from '../runtime/relationship-worker';
 import { compileRelationshipPlan, traceRelationshipTargets } from '../runtime/relationship-routing';
@@ -152,6 +153,7 @@ function validatePolicy(input) {
     })).filter(filter => filter.fieldId) : [],
     resultValue: text(input?.resultValue, 500),
     protect: input?.protect === true,
+    skipDoneTargets: input?.skipDoneTargets === true,
     revision: crypto.randomUUID(),
     status: 'draft',
     updatedAt: new Date().toISOString()
@@ -289,7 +291,7 @@ resolver.define('recordPolicyRun', async ({ payload }) => {
   if (!policy.revision || payload?.policyRevision !== policy.revision) throw new Error('Save and validate the current revision.');
   const configuration = validatePolicy(payload.configuration);
   const keys = Object.keys(configuration).filter(key => !['revision', 'updatedAt', 'status'].includes(key));
-  if (keys.some(key => JSON.stringify(configuration[key]) !== JSON.stringify(policy[key]))) throw new Error('Save the edited configuration before validation.');
+  if (keys.some(key => JSON.stringify(configuration[key]) !== JSON.stringify(key === 'skipDoneTargets' ? policy[key] === true : policy[key]))) throw new Error('Save the edited configuration before validation.');
 
 
   const run = {
@@ -373,8 +375,8 @@ async function prepareActivation(policy, policies) {
   const unsupportedCondition = policy.conditions.find(condition => ['date', 'datetime'].includes(schemaById.get(condition.fieldId)?.type));
   if (unsupportedCondition) throw new Error('Date and date-time condition comparisons are not activation-ready yet.');
   const pieces = policy.conditions.map(condition => compileCondition(condition, schemaById.get(condition.fieldId) || {}));
-  const expression = pieces.map(piece => `(${piece})`).join(policy.conditionMatch === 'OR' ? ' || ' : ' && ');
-  const dependencyFieldIds = [...new Set([...policy.conditions.map(condition => condition.fieldId), ...(policy.protect ? [policy.targetFieldId] : [])])];
+  const expression = `(${pieces.map(piece => `(${piece})`).join(policy.conditionMatch === 'OR' ? ' || ' : ' && ')})${policy.skipDoneTargets ? " && issue.status.category.key != 'done'" : ''}`;
+  const dependencyFieldIds = [...new Set([...policy.conditions.map(condition => condition.fieldId), ...(policy.protect ? [policy.targetFieldId] : []), ...(policy.skipDoneTargets ? ['status'] : [])])];
   if (policies.some(item => item.status === 'active' && item.behaviorType === 'relationship' && (item.runtime.plan.sourceFieldIds.includes(policy.targetFieldId) || dependencyFieldIds.includes(item.targetFieldId)))) throw new Error('Assessment/relationship chaining is not supported in this pilot.');
   const compiledTargetValue = normalizedTargetValue(targetSchema, policy.lastValidatedValue);
   const activatedAt = new Date().toISOString();
@@ -404,9 +406,18 @@ resolver.define('activatePolicy', async ({ payload }) => {
   const review = await kvs.get(`activation-review:v1:${payload.id}`);
   if (!policy || !review || review.reviewToken !== payload.reviewToken || review.policyRevision !== policy.revision || payload.policyRevision !== policy.revision || !Number.isFinite(review.expiresAt) || review.expiresAt <= Date.now()) throw new Error('Review the current revision again; activation review is missing or expired.');
   const { activePolicy, next } = await prepareActivation(policy, policies);
+  let population;
+  if (payload.populationId) {
+    await populationAdmin();
+    population = await readPopulation(payload.populationId);
+    const current = await latestPopulation(policy.id);
+    if (!population || current?.id !== population.id || population.policyId !== policy.id || population.revision !== policy.revision || population.phase !== 'ready' || population.expiresAt <= Date.now()) throw new Error('Prepare and review the target population again.');
+    activePolicy.populationId = population.id;
+  }
   for (const projectId of [...new Set([...policy.projectIds, ...(policy.sourceProjectIds || [])])]) await writeProjectIndex(projectId, next);
   await kvs.set(POLICIES_KEY, next);
   await kvs.delete(`activation-review:v1:${policy.id}`);
+  if (population) await startPopulation(population);
   return activePolicy;
 });
 
@@ -421,6 +432,35 @@ resolver.define('deactivatePolicy', async ({ payload }) => {
   for (const projectId of [...new Set([...policy.projectIds, ...(policy.sourceProjectIds || [])])]) await writeProjectIndex(projectId, next);
   await kvs.set(POLICIES_KEY, next);
   return inactive;
+});
+
+
+async function populationAdmin() {
+  const permission = await jiraJson(api.asUser().requestJira(route`/rest/api/3/mypermissions?permissions=ADMINISTER`), 'Administrator permission');
+  if (!permission.permissions?.ADMINISTER?.havePermission) throw new Error('Jira administrator permission required.');
+}
+resolver.define('preparePopulation', async ({ payload }) => {
+  await populationAdmin();
+  const policies = await readPolicies(), policy = policies.find(item => item.id === payload.id);
+  await prepareActivation(policy, policies);
+  if (policy.status === 'active') throw new Error('Prepare population before activation.');
+  return createPopulation(policy, payload.selection);
+});
+resolver.define('populationStatus', async ({ payload }) => {
+  await populationAdmin();
+  return payload.populationId ? readPopulation(payload.populationId) : latestPopulation(payload.id);
+});
+resolver.define('retryPopulation', async ({ payload }) => {
+  await populationAdmin();
+  const run = await readPopulation(payload.populationId);
+  if (!run || run.phase !== 'error') throw new Error('No failed population to retry.');
+  const policy = (await readPolicies()).find(item => item.id === run.policyId);
+  if (!policy || policy.revision !== run.revision || (run.resumePhase !== 'preparing' && (policy.status !== 'active' || (policy.activatedAt || '') !== run.activatedAt))) throw new Error('Policy is no longer active at this revision.');
+  if ((await latestPopulation(policy.id))?.id !== run.id) throw new Error('This population has been replaced.');
+  run.phase = run.resumePhase || 'running'; run.error = '';
+  await kvs.set(`population:v1:${run.id}`, run);
+  try { await queuePopulation(run.id); } catch (_) { run.phase = 'error'; run.error = 'Retry could not be queued.'; await kvs.set(`population:v1:${run.id}`, run); }
+  return run;
 });
 
 export const handler = resolver.getDefinitions();
