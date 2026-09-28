@@ -66,3 +66,10 @@ The next performance gate is repeated comparable bursts, many independent target
 4. Verify every target field, then correlate unique target batch IDs with ingress, discovery, service and completion times. Do not sum shared per-policy request counts twice. Report Jira-edit-to-result separately from app-ingress timing; trace completion is slightly after the Jira write.
 5. Restore every original source value, verify all sources and target totals, and check for runtime errors. An interrupted test must prioritize restoration before another experiment.
 6. Compare repeated runs with equivalent arrival shape before treating the result as a performance guarantee. Keep private fixture/telemetry artifacts out of Git.
+
+
+## P6.18 — repeated burst and mixed-worker regression gate
+
+The existing private 13-source/three-target fixture was repeated on development 5.14.0 with the same one-point increment and restoration. Expected totals matched, but another sample exceeded the experimental latency target. The slow tail included queue wait and discovery; target calculation alone was not the dominant delay. Private fixture values/logs remain outside Git. Do not describe the 15-second target as consistently met.
+
+The automated suite now has **86 passing tests**. New tests load the real population and relationship workers with shared mocked Jira/KVS state, verify both queue-order interleavings and unchanged suppression, and confirm their common concurrency key/limit. A 100-distinct-target structural reconciliation test verifies combined field writes and pending-record cleanup. These are correctness regressions, not live capacity or Forge scheduler simulations. Live population-overlap acceptance remains pending. This change does not alter runtime code or require deployment; development remains 5.14.0.

@@ -33,11 +33,12 @@ async function harness(targetCount=1){
  const mocks={'@forge/api':{default:{asApp:()=>({requestJira}),asUser:()=>({requestJira})},route:(s,...v)=>s.reduce((a,x,i)=>a+x+(v[i]??''),'')},'@forge/kvs':{WhereConditions:{beginsWith:value=>value},kvs:{query:()=>{let prefix='',size=10;const q={where:(field,value)=>{prefix=value;return q;},limit:value=>{size=value;return q;},getMany:async()=>({results:queryVisible?[...store].filter(([key])=>key.startsWith(prefix)).slice(0,size).map(([key,value])=>({key,value:structuredClone(value)})):[]})};return q;},get:async k=>structuredClone(store.get(k)),set:async(k,v)=>store.set(k,structuredClone(v)),delete:async k=>{if(deleteFailure){deleteFailure=false;throw new Error("checkpoint unavailable");}store.delete(k);}}},'@forge/events':{Queue:class{async push(item){if(pushFailure)throw new Error("queue unavailable");queued.push(item);}}}};
  const cache=new Map();async function load(filename){if(cache.has(filename))return cache.get(filename);const mod=new vm.SourceTextModule(fs.readFileSync(filename,'utf8'),{context,identifier:filename});cache.set(filename,mod);await mod.link(async(n,parent)=>{if(mocks[n])return new vm.SyntheticModule(Object.keys(mocks[n]),function(){for(const[k,v]of Object.entries(mocks[n]))this.setExport(k,v);},{context});return load(path.resolve(path.dirname(parent.identifier),n+'.js'));});return mod;}
  const mod=await load(path.resolve('src/runtime/relationship-worker.js'));await mod.evaluate();
+ const population=await load(path.resolve('src/runtime/population.js'));await population.evaluate();
  return {m:{...mod.namespace,runRelationshipJob:async event=>{
  await mod.namespace.runRelationshipJob(event);
  let count=0;
  while(queued.length){if(++count>1000)throw new Error('Queue did not drain');await mod.namespace.runRelationshipJob({body:queued.shift().body});}
- }},raw:mod.namespace,policy,store,writes,queued,writeBodies,requests,setRoutedTargets:v=>routedTargets=v,setQueryVisible:v=>queryVisible=v,setPutStatus:v=>putStatus=v,setPushFailure:v=>pushFailure=v,failDelete:()=>deleteFailure=true,onPut:fn=>onPut=fn,setPoints:v=>points=v,setTarget:v=>{target=v;targetValues.clear();},unlink:()=>linked=false,deny:()=>editable=false,setEligible:v=>eligible=v,setMatching:v=>matching=v};
+ }},population:population.namespace,raw:mod.namespace,policy,store,writes,queued,writeBodies,requests,setRoutedTargets:v=>routedTargets=v,setQueryVisible:v=>queryVisible=v,setPutStatus:v=>putStatus=v,setPushFailure:v=>pushFailure=v,failDelete:()=>deleteFailure=true,onPut:fn=>onPut=fn,setPoints:v=>points=v,setTarget:v=>{target=v;targetValues.clear();},unlink:()=>linked=false,deny:()=>editable=false,setEligible:v=>eligible=v,setMatching:v=>matching=v};
 }
 const update={body:{eventType:'avi:jira:updated:issue',projectId:'2',key:'ABC-1',changedFields:['customfield_1']}};
 test('story points update writes target once; duplicate event is a no-op',async()=>{const h=await harness();await h.m.runRelationshipJob(update);assert.deepEqual(h.writes,[11]);await h.m.runRelationshipJob(update);assert.deepEqual(h.writes,[11]);});
@@ -244,4 +245,38 @@ test('inline failure waits for its sibling and replays only incomplete targets',
  // The first edit reached Jira before the transport failed; fresh reads suppress
  // repeating that write. The unstarted third target is recovered on replay.
  assert.equal(h.writes.length,3);assert.equal(h.store.has(wake.body.inboxId),false);
+});
+
+
+// Load both production workers against the same Jira/KVS mocks. These tests
+// exercise interleaving at queue boundaries, not Forge scheduling latency.
+for(const populationFirst of [true,false])test(`population and live rollup share state (population first: ${populationFirst})`,async()=>{
+ const h=await harness();
+ h.store.set('population-current:v1:p','run');
+ h.store.set('population:v1:run',{id:'run',policyId:'p',revision:'r',activatedAt:'',phase:'running',pages:1,page:0,offset:0,updated:0,unchanged:0,skipped:0,excludeDone:true});
+ h.store.set('population-page:v1:run:0',['IDEA-1','IDEA-2']);
+ await h.population.queuePopulation('run');await h.raw.enqueueRelationshipEvent(sourceEvent(1));
+ const populationJob=h.queued.shift(),liveJob=h.queued.shift();
+ assert.equal(populationJob.concurrency.key,liveJob.concurrency.key);
+ assert.equal(populationJob.concurrency.limit,1);assert.equal(liveJob.concurrency.limit,1);
+ if(populationFirst){
+   await h.population.runPopulationJob(populationJob);
+   // A source edit while population is unfinished must reach the first target.
+   h.setPoints(17);await h.raw.runRelationshipJob({body:liveJob.body});
+ }else{
+   await h.raw.runRelationshipJob({body:liveJob.body});
+   await h.population.runPopulationJob(populationJob);
+ }
+ while(h.queued.length)await h.population.runPopulationJob(h.queued.shift());
+ assert.equal(h.store.get('population:v1:run').phase,'complete');
+ if(populationFirst)assert.deepEqual(h.writes,[11,17,17]);
+ else assert.deepEqual(h.writes,[11,11]); // population skips the current first target
+});
+test('100 independent targets complete with combined fields and no duplicate writes',async()=>{
+ const h=await harness(100);const second=structuredClone(h.policy);second.id='second';second.targetFieldId='customfield_3';
+ h.store.set('field-policies:v1',[h.policy,second]);
+ await h.m.runRelationshipJob({body:{...update.body,eventType:'avi:jira:created:issue'}});
+ assert.equal(h.writeBodies.length,100);
+ assert.ok(h.writeBodies.every(fields=>fields.customfield_2===11&&fields.customfield_3===11));
+ assert.equal([...h.store.keys()].filter(k=>k.startsWith('relationship-pending:')).length,0);
 });

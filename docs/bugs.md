@@ -58,3 +58,8 @@ R18 verification: private development **5.12.0** deployed on 2026-09-25. **79 te
 ### BUG-001 — bounded inline fan-out refinement
 
 Two finite iterations extend inline processing to three distinct targets, then overlap at most two within the same writer slot. Regression tests cover overflow continuations, maximum overlap and waiting for sibling completion before retry. All 83 tests, ESLint and Forge lint pass. Private development 5.14.0 passed two controlled live correctness cycles and the second increment sample met the experimental latency goal, but restoration exceeded it; consistent latency acceptance is not achieved. The broader scale issue stays open until repeated burst and population-overlap acceptance; private measurements remain outside Git.
+
+
+### BUG-001 — repeatability gate
+
+Repetition on development 5.14.0 confirmed correct totals but another latency miss. Queue wait plus discovery still dominates the slow tail; the issue remains open. Added three regressions (86 tests total): shared population/live worker state in both queue orders and 100 independent target writes. Live mixed population traffic and a safe writer-lane migration remain pending. No runtime change in this verification-only commit.
