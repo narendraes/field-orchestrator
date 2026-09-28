@@ -123,6 +123,8 @@ async function pushJob(body) {
 
 const INBOX_PREFIX = 'relationship-inbox:v1:';
 const INBOX_BATCH_SIZE = 10;
+const INLINE_TARGET_LIMIT = 3;
+const INLINE_TARGET_CONCURRENCY = 2;
 
 export async function enqueueRelationshipEvent(event) {
   // Unique immutable inbox records allow concurrent ingress without racing over
@@ -176,12 +178,23 @@ async function runInbox(body, workerStartedAt) {
   }
   const routingMs = Date.now() - routingStartedAt;
   // Do useful work while holding the writer slot, rather than enqueueing a
-  // second job that immediately contends with this same slot. Only one target
-  // runs inline, bounding the invocation; remaining targets stay durable/queued.
+  // second job that immediately contends with this same slot. A bounded group
+  // of three targets runs inline; remaining targets stay durable/queued.
   const jobs = [...targets].map(([key, token]) => ({ flushTarget: key, token, jobStartedAt: workerStartedAt,
     discoveryMs: routingMs, inboxBatchSize: processed.length, discoveryRequests: jira.requests() }));
-  for (const job of jobs.slice(1)) await ensureScheduled(job);
-  if (jobs[0]) await flushTarget(jobs[0], (await kvs.get('field-policies:v1') || []).filter(p => p.status === 'active' && p.behaviorType === 'relationship'));
+  for (const job of jobs.slice(INLINE_TARGET_LIMIT)) await ensureScheduled(job);
+  const inline = jobs.slice(0, INLINE_TARGET_LIMIT);
+  for (let offset = 0; offset < inline.length; offset += INLINE_TARGET_CONCURRENCY) {
+    const policies = (await kvs.get('field-policies:v1') || []).filter(p => p.status === 'active' && p.behaviorType === 'relationship');
+    // The Map guarantees distinct target keys. Each target owns its pending
+    // record and Jira adapter; the installation writer slot still excludes all
+    // other relationship/population jobs. Bound requests to two concurrent targets.
+    // Wait for every member before retrying: Promise.all alone could release the
+    // writer slot while another target was still completing its Jira edit.
+    const settled = await Promise.allSettled(inline.slice(offset, offset + INLINE_TARGET_CONCURRENCY).map(job => flushTarget(job, policies)));
+    const failure = settled.find(result => result.status === 'rejected');
+    if (failure) throw failure.reason;
+  }
   // Acknowledge only after writes or durable continuation dispatch. On a crash,
   // replay reads current values and suppresses a previously successful write.
   for (const key of processed) await kvs.delete(key);

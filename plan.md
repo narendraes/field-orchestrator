@@ -266,3 +266,18 @@ R17 release evidence (2026-09-25): deployed privately to development as **5.11.0
 See [performance-design.md](docs/performance-design.md) for the capacity model, constraints and acceptance gate. BUG-001 remains open pending measured end-to-end improvement.
 
 R18 verification: private development **5.12.0** deployed on 2026-09-25. **79 tests**, ESLint and Forge lint passed. The mocked ingress burst confirmed ten calculations and one changed-value write for 100 pending events on a shared target. Live latency/capacity remains unverified. Discovery stops accepting additional records after 15 seconds between records, as well as the ten-record maximum; this does not interrupt an in-flight request.
+
+## Two-iteration performance goal
+
+Experimental target: all three affected targets in a controlled 13-source burst converge within 15 seconds of app ingress, with exact totals and original test values restored. This is not a production SLA. Iteration one increases the bounded inline target group from one to three under the existing global lock; excess targets remain queued. Iteration two processes at most two distinct inline targets concurrently inside the same global writer slot. Each target retains independent request accounting and pending state; all siblings settle before a failure is retried. Additional target groups wait. Population and other queue invocations remain serialized. This increases instantaneous API pressure to two target requests and does not establish general scale readiness. Verify meaningful unit tests and live reversible edits; retain private fixture keys/logs outside Git. Reassess strategy if latency or correctness regresses. Independent-target lane migration remains separate work.
+
+- [x] P4.26 — Up to three inline targets; at most two concurrent distinct targets within the existing writer slot.
+- [x] P6.16 — Regression checks for fan-out, bounded overlap and sibling completion before retry (83 tests total).
+- [x] P6.17 — Two reversible private live iterations and latency assessment; final restoration verified before handoff.
+
+
+### Two-iteration delivery status
+
+Private development **5.14.0** contains both refinements. **83 automated tests**, ESLint and Forge lint passed. Two controlled live edit/restore cycles verified all expected rollup fields across the fixture's three targets; all original source values and target totals were restored and verified after each run. The second increment sample met the experimental ingress-to-result target, but its restoration exceeded it. The latency objective is therefore not consistently achieved. This is finite sample evidence, not a percentile/SLA or a capacity claim. Private keys, timestamps and raw logs remain outside Git.
+
+The next performance gate is repeated comparable bursts, many independent targets and population overlap. If queue wait dominates again, pursue coordinated writer lanes (including population and migration), rather than raising the global concurrency limit on shared pending state. If API throttling increases, reduce within-worker overlap. No unattended recurring test is enabled.

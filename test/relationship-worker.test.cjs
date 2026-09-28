@@ -6,7 +6,7 @@ const vm=require('node:vm');
 const {randomUUID}=require('node:crypto');
 async function harness(targetCount=1){
  const context=vm.createContext({console:{info(){},warn(){}},crypto:{randomUUID}}),store=new Map(),writes=[],queued=[],writeBodies=[],requests=[];
- let points=11,target=3,linked=true,editable=true,matching=true,eligible=true,putStatus=200,pushFailure=false,deleteFailure=false,onPut=null,queryVisible=true;
+ let points=11,target=3,linked=true,editable=true,matching=true,eligible=true,putStatus=200,pushFailure=false,deleteFailure=false,onPut=null,queryVisible=true,routedTargets=1;
  const targetValues=new Map();
  const policy={id:'p',revision:'r',name:'Rollup',status:'active',behaviorType:'relationship',projectIds:['1'],sourceProjectIds:['2'],targetFieldId:'customfield_2',sourceFieldId:'customfield_1',aggregation:'sum',filters:[],runtime:{plan:{sourceProjectIds:['2'],targetProjectIds:['1'],sourceFieldIds:['customfield_1','status','parent','issuetype','project'],targetFieldIds:['customfield_2'],linkTypeId:'7',relatedIssueTypeIds:['9'],hierarchyDepth:1,maxTargets:50}}};store.set('field-policies:v1',[policy]);
  const requestJira=async(url,options={})=>{
@@ -21,13 +21,13 @@ async function harness(targetCount=1){
   }
   else if(q.includes('issuetype in'))data={issues:[{key:'ABC-2',fields:{project:{id:'2'}}}]};
   else if(q.startsWith('parent in'))data={issues:[{key:'ABC-1',fields:{parent:{key:'ABC-2'}}}]};
-  else if(q.includes('project in ("1")'))data={issues:[{key:'IDEA-1',fields:{project:{id:'1'}}}]};
+  else if(q.includes('project in ("1")'))data={issues:Array.from({length:routedTargets},(_,i)=>({key:'IDEA-'+(i+1),fields:{project:{id:'1'}}}))};
   else data={issues:matching?[{key:'ABC-1',fields:{customfield_1:points}}]:[]};
  }else if(url.endsWith('/editmeta'))data={fields:editable?{customfield_2:{schema:{type:'number'}},customfield_3:{schema:{type:'number'}}}:{}};
- else if(options.method==='PUT'){if(putStatus!==200)return {ok:false,status:putStatus};const fields=JSON.parse(options.body).fields;writeBodies.push(fields);writes.push(fields.customfield_2);targetValues.set(url.split('/issue/')[1],fields);if(onPut)onPut();}
+ else if(options.method==='PUT'){if(putStatus!==200)return {ok:false,status:putStatus};const fields=JSON.parse(options.body).fields;writeBodies.push(fields);writes.push(fields.customfield_2);targetValues.set(url.split('/issue/')[1],fields);if(onPut)await onPut(url);}
  else if(url.includes('/issue/IDEA-'))data={key:url.split('/issue/')[1].split('?')[0],fields:{project:{id:'1'},customfield_2:target,customfield_3:target,...targetValues.get(url.split('/issue/')[1].split('?')[0]),issuelinks:linked?[{type:{id:'7'},outwardIssue:{key:'ABC-2'}}]:[]}};
  else if(url.includes('/issue/ABC-1'))data={key:'ABC-1',fields:{project:{id:'2'},parent:{key:'ABC-2'}}};
- else data={key:'ABC-2',fields:{project:{id:'2'},issuelinks:[{type:{id:'7'},inwardIssue:{key:'IDEA-1'}}]}};
+ else data={key:'ABC-2',fields:{project:{id:'2'},issuelinks:Array.from({length:routedTargets},(_,i)=>({type:{id:'7'},inwardIssue:{key:'IDEA-'+(i+1)}}))}};
  return {ok:true,status:200,json:async()=>data};
  };
  const mocks={'@forge/api':{default:{asApp:()=>({requestJira}),asUser:()=>({requestJira})},route:(s,...v)=>s.reduce((a,x,i)=>a+x+(v[i]??''),'')},'@forge/kvs':{WhereConditions:{beginsWith:value=>value},kvs:{query:()=>{let prefix='',size=10;const q={where:(field,value)=>{prefix=value;return q;},limit:value=>{size=value;return q;},getMany:async()=>({results:queryVisible?[...store].filter(([key])=>key.startsWith(prefix)).slice(0,size).map(([key,value])=>({key,value:structuredClone(value)})):[]})};return q;},get:async k=>structuredClone(store.get(k)),set:async(k,v)=>store.set(k,structuredClone(v)),delete:async k=>{if(deleteFailure){deleteFailure=false;throw new Error("checkpoint unavailable");}store.delete(k);}}},'@forge/events':{Queue:class{async push(item){if(pushFailure)throw new Error("queue unavailable");queued.push(item);}}}};
@@ -37,7 +37,7 @@ async function harness(targetCount=1){
  await mod.namespace.runRelationshipJob(event);
  let count=0;
  while(queued.length){if(++count>1000)throw new Error('Queue did not drain');await mod.namespace.runRelationshipJob({body:queued.shift().body});}
- }},raw:mod.namespace,policy,store,writes,queued,writeBodies,requests,setQueryVisible:v=>queryVisible=v,setPutStatus:v=>putStatus=v,setPushFailure:v=>pushFailure=v,failDelete:()=>deleteFailure=true,onPut:fn=>onPut=fn,setPoints:v=>points=v,setTarget:v=>{target=v;targetValues.clear();},unlink:()=>linked=false,deny:()=>editable=false,setEligible:v=>eligible=v,setMatching:v=>matching=v};
+ }},raw:mod.namespace,policy,store,writes,queued,writeBodies,requests,setRoutedTargets:v=>routedTargets=v,setQueryVisible:v=>queryVisible=v,setPutStatus:v=>putStatus=v,setPushFailure:v=>pushFailure=v,failDelete:()=>deleteFailure=true,onPut:fn=>onPut=fn,setPoints:v=>points=v,setTarget:v=>{target=v;targetValues.clear();},unlink:()=>linked=false,deny:()=>editable=false,setEligible:v=>eligible=v,setMatching:v=>matching=v};
 }
 const update={body:{eventType:'avi:jira:updated:issue',projectId:'2',key:'ABC-1',changedFields:['customfield_1']}};
 test('story points update writes target once; duplicate event is a no-op',async()=>{const h=await harness();await h.m.runRelationshipJob(update);assert.deepEqual(h.writes,[11]);await h.m.runRelationshipJob(update);assert.deepEqual(h.writes,[11]);});
@@ -213,4 +213,35 @@ test('inline transient failure preserves inbox until successful replay',async()=
  const h=await harness();await h.raw.enqueueRelationshipEvent(sourceEvent(1));const wake=h.queued.shift();h.setPutStatus(429);
  await assert.rejects(()=>h.raw.runRelationshipJob({body:wake.body}),/429/);assert.ok(h.store.has(wake.body.inboxId));
  h.setPutStatus(200);await h.raw.runRelationshipJob({body:wake.body});assert.deepEqual(h.writes,[11]);assert.equal(h.store.has(wake.body.inboxId),false);
+});
+
+test('three related targets complete in the ingress worker without another queue handoff',async()=>{
+ const h=await harness();h.setRoutedTargets(3);await h.raw.enqueueRelationshipEvent(sourceEvent(1));
+ await h.raw.runRelationshipJob({body:h.queued.shift().body});assert.equal(h.writes.length,3);assert.equal(h.queued.length,0);
+});
+test('targets beyond the inline limit remain durably queued and complete',async()=>{
+ const h=await harness();h.setRoutedTargets(5);await h.raw.enqueueRelationshipEvent(sourceEvent(1));
+ await h.raw.runRelationshipJob({body:h.queued.shift().body});assert.equal(h.writes.length,3);assert.equal(h.queued.length,2);
+ await h.m.runRelationshipJob({body:h.queued.shift().body});assert.equal(h.writes.length,5);
+});
+
+
+test('distinct inline targets overlap with a maximum of two writers',async()=>{
+ const h=await harness();h.setRoutedTargets(3);let active=0,peak=0;
+ h.onPut(async()=>{active++;peak=Math.max(peak,active);await new Promise(resolve=>setTimeout(resolve,10));active--;});
+ await h.raw.enqueueRelationshipEvent(sourceEvent(1));await h.raw.runRelationshipJob({body:h.queued.shift().body});
+ assert.equal(peak,2);assert.equal(active,0);assert.equal(h.writes.length,3);
+});
+test('inline failure waits for its sibling and replays only incomplete targets',async()=>{
+ const h=await harness();h.setRoutedTargets(3);let siblingFinished=false;
+ h.onPut(async url=>{if(url.endsWith('IDEA-1'))throw new Error('transport lost');await new Promise(resolve=>setTimeout(resolve,10));siblingFinished=true;});
+ await h.raw.enqueueRelationshipEvent(sourceEvent(1));const wake=h.queued.shift();
+ await assert.rejects(()=>h.raw.runRelationshipJob({body:wake.body}),/transport lost/);
+ assert.equal(siblingFinished,true);assert.equal(h.store.has(wake.body.inboxId),true);
+ assert.equal(h.store.has('relationship-pending:v1:IDEA-2'),false);
+ assert.equal(h.store.has('relationship-pending:v1:IDEA-3'),true);
+ h.onPut(null);await h.raw.runRelationshipJob({body:wake.body});
+ // The first edit reached Jira before the transport failed; fresh reads suppress
+ // repeating that write. The unstarted third target is recovered on replay.
+ assert.equal(h.writes.length,3);assert.equal(h.store.has(wake.body.inboxId),false);
 });
