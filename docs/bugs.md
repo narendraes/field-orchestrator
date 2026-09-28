@@ -63,3 +63,10 @@ Two finite iterations extend inline processing to three distinct targets, then o
 ### BUG-001 — repeatability gate
 
 Repetition on development 5.14.0 confirmed correct totals but another latency miss. Queue wait plus discovery still dominates the slow tail; the issue remains open. Added three regressions (86 tests total): shared population/live worker state in both queue orders and 100 independent target writes. Live mixed population traffic and a safe writer-lane migration remain pending. No runtime change in this verification-only commit.
+
+
+### BUG-001 — split discovery experiment
+
+R19 separates discovery from the shared Jira writer lock with immutable target handoffs. Legacy and population writers retain the same lock. Added migration, retry and overlap regression tests. Private 5.15.0 live correctness passed, but extra writer queue waiting offset the concurrency benefit. Split ingress is disabled again, with v2 drain handlers retained. 95 tests pass; target-owned writer and population migration is still required. Keep this issue open.
+
+R19 release decision: private development **5.16.0** deployed with split ingress **disabled** and v2 drain handlers retained. **95 tests**, ESLint and Forge lint pass. Live increment and restoration produced correct totals; all original source and target values were restored. Writer waiting persisted in both directions, so no performance win is claimed. Next work must coordinate target-owned writer lanes with population and legacy-job draining.

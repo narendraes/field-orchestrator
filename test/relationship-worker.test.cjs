@@ -4,7 +4,7 @@ const fs=require('node:fs');
 const path=require('node:path');
 const vm=require('node:vm');
 const {randomUUID}=require('node:crypto');
-async function harness(targetCount=1){
+async function harness(targetCount=1,split=false){
  const context=vm.createContext({console:{info(){},warn(){}},crypto:{randomUUID}}),store=new Map(),writes=[],queued=[],writeBodies=[],requests=[];
  let points=11,target=3,linked=true,editable=true,matching=true,eligible=true,putStatus=200,pushFailure=false,deleteFailure=false,onPut=null,queryVisible=true,routedTargets=1;
  const targetValues=new Map();
@@ -31,7 +31,7 @@ async function harness(targetCount=1){
  return {ok:true,status:200,json:async()=>data};
  };
  const mocks={'@forge/api':{default:{asApp:()=>({requestJira}),asUser:()=>({requestJira})},route:(s,...v)=>s.reduce((a,x,i)=>a+x+(v[i]??''),'')},'@forge/kvs':{WhereConditions:{beginsWith:value=>value},kvs:{query:()=>{let prefix='',size=10;const q={where:(field,value)=>{prefix=value;return q;},limit:value=>{size=value;return q;},getMany:async()=>({results:queryVisible?[...store].filter(([key])=>key.startsWith(prefix)).slice(0,size).map(([key,value])=>({key,value:structuredClone(value)})):[]})};return q;},get:async k=>structuredClone(store.get(k)),set:async(k,v)=>store.set(k,structuredClone(v)),delete:async k=>{if(deleteFailure){deleteFailure=false;throw new Error("checkpoint unavailable");}store.delete(k);}}},'@forge/events':{Queue:class{async push(item){if(pushFailure)throw new Error("queue unavailable");queued.push(item);}}}};
- const cache=new Map();async function load(filename){if(cache.has(filename))return cache.get(filename);const mod=new vm.SourceTextModule(fs.readFileSync(filename,'utf8'),{context,identifier:filename});cache.set(filename,mod);await mod.link(async(n,parent)=>{if(mocks[n])return new vm.SyntheticModule(Object.keys(mocks[n]),function(){for(const[k,v]of Object.entries(mocks[n]))this.setExport(k,v);},{context});return load(path.resolve(path.dirname(parent.identifier),n+'.js'));});return mod;}
+ const cache=new Map();async function load(filename){if(cache.has(filename))return cache.get(filename);const mod=new vm.SourceTextModule(fs.readFileSync(filename,'utf8').replace('const SEPARATE_DISCOVERY = false;',`const SEPARATE_DISCOVERY = ${split};`),{context,identifier:filename});cache.set(filename,mod);await mod.link(async(n,parent)=>{if(mocks[n])return new vm.SyntheticModule(Object.keys(mocks[n]),function(){for(const[k,v]of Object.entries(mocks[n]))this.setExport(k,v);},{context});return load(path.resolve(path.dirname(parent.identifier),n+'.js'));});return mod;}
  const mod=await load(path.resolve('src/runtime/relationship-worker.js'));await mod.evaluate();
  const population=await load(path.resolve('src/runtime/population.js'));await population.evaluate();
  return {m:{...mod.namespace,runRelationshipJob:async event=>{
@@ -279,4 +279,73 @@ test('100 independent targets complete with combined fields and no duplicate wri
  assert.equal(h.writeBodies.length,100);
  assert.ok(h.writeBodies.every(fields=>fields.customfield_2===11&&fields.customfield_3===11));
  assert.equal([...h.store.keys()].filter(k=>k.startsWith('relationship-pending:')).length,0);
+});
+
+
+test('split discovery publishes durable signals without writing pending state or Jira',async()=>{
+ const h=await harness(1,true);await h.raw.enqueueRelationshipEvent(sourceEvent(1));const wake=h.queued.shift();
+ assert.equal(wake.concurrency.key,'relationship-discovery-v2');
+ await h.raw.runRelationshipJob({body:wake.body});
+ assert.equal(h.writes.length,0);assert.equal([...h.store.keys()].some(k=>k.startsWith('relationship-pending:')),false);
+ assert.equal(h.queued[0].concurrency.key,'relationship-writes-v1');
+ await h.m.runRelationshipJob({body:h.queued.shift().body});assert.deepEqual(h.writes,[11]);
+ assert.equal([...h.store.keys()].some(k=>k.startsWith('relationship-signal:')),false);
+});
+test('split query lag and duplicate wakes preserve work without duplicate writes',async()=>{
+ const h=await harness(1,true);h.setQueryVisible(false);await h.raw.enqueueRelationshipEvent(sourceEvent(1));const wake=h.queued.shift();
+ await h.raw.runRelationshipJob({body:wake.body});const writer=h.queued.shift();
+ await h.raw.runRelationshipJob({body:writer.body});await h.raw.runRelationshipJob({body:writer.body});
+ assert.deepEqual(h.writes,[11]);
+});
+test('split failed dispatch retains discovery input and replay converges',async()=>{
+ const h=await harness(1,true);await h.raw.enqueueRelationshipEvent(sourceEvent(1));const wake=h.queued.shift();h.setPushFailure(true);
+ await assert.rejects(()=>h.raw.runRelationshipJob({body:wake.body}),/queue/);assert.ok(h.store.has(wake.body.inboxId));
+ h.setPushFailure(false);await h.m.runRelationshipJob({body:wake.body});assert.deepEqual(h.writes,[11]);
+});
+test('split writer retries transport errors and drops stale policy references',async()=>{
+ const h=await harness(1,true);await h.raw.enqueueRelationshipEvent(sourceEvent(1));await h.raw.runRelationshipJob({body:h.queued.shift().body});
+ const writer=h.queued.shift();h.setPutStatus(429);await assert.rejects(()=>h.raw.runRelationshipJob({body:writer.body}),/429/);
+ assert.ok(h.store.has(writer.body.signalId));h.setPutStatus(200);h.policy.revision='changed';h.store.set('field-policies:v1',[h.policy]);
+ await h.raw.runRelationshipJob({body:writer.body});assert.equal(h.writes.length,0);
+});
+test('new discovery during a writer is preserved for a follow-up',async()=>{
+ const h=await harness(1,true);await h.raw.enqueueRelationshipEvent(sourceEvent(1));await h.raw.runRelationshipJob({body:h.queued.shift().body});
+ const writer=h.queued.shift();h.onPut(async()=>{h.onPut(null);h.setPoints(18);await h.raw.enqueueRelationshipEvent(sourceEvent(2));await h.raw.runRelationshipJob({body:h.queued.shift().body});});
+ await h.raw.runRelationshipJob({body:writer.body});await h.m.runRelationshipJob({body:h.queued.shift().body});
+ assert.deepEqual(h.writes,[11,18]);
+});
+
+
+test('split signals consolidate policies, preserve protection and drain alongside legacy pending work',async()=>{
+ const h=await harness(1,true);h.policy.protect=true;const second=structuredClone(h.policy);second.id='second';second.targetFieldId='customfield_3';h.store.set('field-policies:v1',[h.policy,second]);
+ await h.raw.runRelationshipJob(update);const legacy=h.queued.shift();
+ await h.raw.enqueueRelationshipEvent({eventType:'avi:jira:updated:issue',issue:{key:'IDEA-1',fields:{project:{id:'1'}}},changelog:{items:[{fieldId:'customfield_2'}]}});
+ await h.raw.runRelationshipJob({body:h.queued.shift().body});
+ await h.m.runRelationshipJob({body:h.queued.shift().body});await h.raw.runRelationshipJob({body:legacy.body});
+ assert.deepEqual(h.writeBodies,[{customfield_2:11,customfield_3:11}]);
+ assert.ok([...h.store.values()].some(v=>v?.outcome==='restored'));
+});
+test('split structural continuation discovers every target across pages',async()=>{
+ const h=await harness(61,true);await h.raw.enqueueRelationshipEvent({...sourceEvent(1),eventType:'avi:jira:created:issue'});
+ await h.m.runRelationshipJob({body:h.queued.shift().body});assert.equal(h.writes.length,61);
+ assert.equal([...h.store.keys()].filter(k=>k.startsWith('relationship-signal:')).length,0);
+});
+test('split discovery can run during population without touching its target value',async()=>{
+ const h=await harness(1,true);
+ h.store.set('population-current:v1:p','run');h.store.set('population:v1:run',{id:'run',policyId:'p',revision:'r',activatedAt:'',phase:'running',pages:1,page:0,offset:0,updated:0,unchanged:0,skipped:0,excludeDone:true});
+ h.store.set('population-page:v1:run:0',['IDEA-1']);
+ h.onPut(async()=>{h.onPut(null);h.setPoints(23);await h.raw.enqueueRelationshipEvent(sourceEvent(1));await h.raw.runRelationshipJob({body:h.queued.shift().body});assert.equal(h.writes.length,1);});
+ await h.population.runPopulationJob({body:{populationId:'run'}});
+ assert.equal(h.queued[0].concurrency.key,'relationship-writes-v1');
+ await h.m.runRelationshipJob({body:h.queued.shift().body});assert.deepEqual(h.writes,[11,23]);
+});
+
+
+test('split burst combines ten discovery handoffs into one current target write',async()=>{
+ const h=await harness(1,true);h.setPoints(100);
+ for(let n=1;n<=100;n++)await h.raw.enqueueRelationshipEvent(sourceEvent(n));
+ await h.m.runRelationshipJob({body:h.queued.shift().body});
+ assert.deepEqual(h.writes,[100]);
+ assert.equal(h.requests.filter(r=>r.options.body?.includes('parent in')).length,1);
+ assert.equal([...h.store.keys()].filter(k=>k.startsWith('relationship-discovery:')||k.startsWith('relationship-signal:')).length,0);
 });

@@ -294,3 +294,24 @@ The automated suite now has **86 passing tests**. New tests load the real popula
 - [ ] P6.19 — Exercise live population overlap on an explicitly prepared small target selection, then repeated bursts under the migrated writer design.
 
 Decision: retain the existing writer lock for now. The next runtime change must coordinate discovery, target writers and population together; simply increasing the current queue concurrency would invalidate pending-state safety.
+
+
+## R19 — separate discovery, retain coordinated writers
+
+Implemented behind a disabled-by-default build switch: when enabled, new manifest-admitted ingress uses immutable `relationship-discovery:v2:<uuid>` records and the `relationship-discovery-v2` concurrency key (limit 1). Discovery batches at most ten records with the existing between-record 15-second budget, uses narrow read-only Jira routing, and publishes unique `relationship-signal:v2:<target>:<uuid>` handoffs before acknowledging inputs. It never mutates pending target records or writes Jira fields. Signals contain policy generation and source identifiers, not field values.
+
+Target consumers remain on `relationship-writes-v1` (limit 1), shared with population and legacy jobs. They merge up to ten handoffs for the same target, recheck current policy generations, calculate current values, consolidate changed fields and acknowledge only consumed signal keys after completion. Query lag is covered by direct reads of waking records. Discovery can publish new signals during a target write; those keys retain their own wake. Failed publication retains discovery input for retry; duplicate handoffs suppress equivalent writes. No event trigger, scope or manifest filter changes.
+
+Migration: old v1 inbox/flush handlers remain available and every Jira writer retains the same lock, so mixed old/new jobs cannot race over pending state. The compiled `SEPARATE_DISCOVERY` switch can return ingress to v1 while keeping v2 handlers to drain existing signals. Do not roll back to a binary without v2 handlers until those jobs and records drain. Target-hashed independent writer lanes are **not implemented** in this stage. Their population and legacy-job migration remains a separate gate.
+
+Tradeoff: discovery can overlap a writer, but introduces a durable handoff and additional queue/KVS work. Request pressure can reach one discovery stream plus existing writer requests. Forge currently limits async event pushes to 500/minute per installation; this is not a throughput promise. Queue backoff can still dominate latency. Live comparison decides whether to keep new ingress enabled. Exhausted retries without future wakes still require operator recovery; no TTL drops unfinished work.
+
+Validation: 95 automated tests cover split dispatch/acknowledgement, stale revisions, retries, lagged queries, new signals during writes, legacy coexistence, protection, paginated structural discovery and discovery during population. The split experiment deployed privately as 5.15.0 and produced correct live totals, but did not establish a latency improvement. New ingress is switched back to v1; v2 drain handlers remain installed. The final release retains the legacy ingress default and supports draining v2 jobs; release verification is recorded below. The handoff architecture is implemented but disabled by default, not an active performance improvement.
+
+- [x] P4.28 — Separate read-only discovery using immutable target handoffs, retaining the shared writer lock and old handlers.
+- [x] P6.20 — Regression tests for split discovery, live/population overlap and mixed legacy jobs.
+- [x] P6.21 — Correct live totals, but writer waiting persisted; disable split ingress and retain drain handlers.
+
+Telemetry for split writes adds `pipeline`, `signalBatchSize` and `writerQueueMs` (oldest consumed handoff to writer start). Discovery timings describe the first consumed signal batch and must not be summed across target/policy records. `sinceIngressMs` still excludes Jira-to-Forge delivery time.
+
+R19 release decision: private development **5.16.0** deployed with split ingress **disabled** and v2 drain handlers retained. **95 tests**, ESLint and Forge lint pass. Live increment and restoration produced correct totals; all original source and target values were restored. Writer waiting persisted in both directions, so no performance win is claimed. Next work must coordinate target-owned writer lanes with population and legacy-job draining.

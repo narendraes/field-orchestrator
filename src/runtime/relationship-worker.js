@@ -113,7 +113,7 @@ export async function calculateTarget(policy, targetKey, jira) {
 async function pushJob(body) {
   // No artificial delay: the shared concurrency key still serializes writers.
   try {
-    await queue.push({ body, concurrency: { key: 'relationship-writes-v1', limit: 1 } });
+    await queue.push({ body, concurrency: { key: body.pipeline === 'discovery-v2' ? 'relationship-discovery-v2' : 'relationship-writes-v1', limit: 1 } });
   } catch (cause) {
     const error = new Error('Could not queue remaining targets; discovery will retry.');
     error.retryable = true;
@@ -121,6 +121,11 @@ async function pushJob(body) {
   }
 }
 
+// Opt-in at build time. The split experiment did not improve the writer tail;
+// keep its handlers for draining and future coordinated target-lane migration.
+const SEPARATE_DISCOVERY = false;
+const DISCOVERY_PREFIX = 'relationship-discovery:v2:';
+const SIGNAL_PREFIX = 'relationship-signal:v2:';
 const INBOX_PREFIX = 'relationship-inbox:v1:';
 const INBOX_BATCH_SIZE = 10;
 const INLINE_TARGET_LIMIT = 3;
@@ -129,7 +134,7 @@ const INLINE_TARGET_CONCURRENCY = 2;
 export async function enqueueRelationshipEvent(event) {
   // Unique immutable inbox records allow concurrent ingress without racing over
   // one shared array. Only identifiers are retained, after the manifest gate.
-  const inboxId = `${INBOX_PREFIX}${crypto.randomUUID()}`;
+  const inboxId = `${SEPARATE_DISCOVERY ? DISCOVERY_PREFIX : INBOX_PREFIX}${crypto.randomUUID()}`;
   const body = {
     receivedAt: Date.now(), eventType: event.eventType, key: event.issue?.key || '',
     projectId: String(event.issue?.fields?.project?.id || event.issue?.project?.id || event.sourceProjectId || ''),
@@ -137,7 +142,7 @@ export async function enqueueRelationshipEvent(event) {
     changedFields: (event.changelog?.items || []).map(item => item.fieldId).filter(Boolean).slice(0, 100)
   };
   await kvs.set(inboxId, body);
-  await pushJob({ inboxId });
+  await pushJob({ inboxId, ...(SEPARATE_DISCOVERY ? { pipeline: 'discovery-v2' } : {}) });
 }
 
 function cachedDiscovery(jira) {
@@ -154,6 +159,70 @@ function cachedDiscovery(jira) {
       return searches.get(signature);
     }
   };
+}
+
+// Discovery has its own serialized lane and never mutates pending target state.
+// Unique handoff records let it overlap the writer without read/modify/write races.
+// Legacy jobs and population keep their existing writer key during this migration.
+async function readSignals(prefix, ownKey) {
+  const own = ownKey ? await kvs.get(ownKey) : null;
+  const records = new Map(own ? [[ownKey, own]] : []);
+  const page = await kvs.query().where('key', WhereConditions.beginsWith(prefix)).limit(INBOX_BATCH_SIZE).getMany();
+  for (const item of page.results || []) {
+    if (records.size >= INBOX_BATCH_SIZE) break;
+    records.set(item.key, item.value);
+  }
+  return records;
+}
+
+async function publishSignals(signals, metrics) {
+  for (const [targetKey, refs] of signals) {
+    const signalId = `${SIGNAL_PREFIX}${targetKey}:${crypto.randomUUID()}`;
+    await kvs.set(signalId, { targetKey, refs: [...refs.values()], ...metrics, handoffAt: Date.now() });
+    // Publication precedes acknowledgement. Failure retries the discovery input;
+    // duplicate signals are harmless because writers always read current values.
+    await pushJob({ signalId, signalTarget: targetKey });
+  }
+}
+
+async function runDiscovery(body) {
+  const records = body.inboxId ? await readSignals(DISCOVERY_PREFIX, body.inboxId) : new Map([['continuation', body]]);
+  const signals = new Map(), jira = cachedDiscovery(jiraAccess()), routes = new Map();
+  const policies = (await kvs.get('field-policies:v1') || []).filter(p => p.status === 'active' && p.behaviorType === 'relationship');
+  const started = Date.now(), processed = [];
+  for (const [key, value] of records) {
+    if (processed.length && Date.now() - started >= 15000) break;
+    await runRelationshipJob({ body: { ...value, pipeline: 'discovery-v2' }, targetSignals: signals,
+      discoveryJira: jira, discoveryRoutes: routes, discoveryPolicies: policies });
+    processed.push(key);
+  }
+  await publishSignals(signals, { discoveryMs: Date.now() - started, discoveryRequests: jira.requests(), inboxBatchSize: processed.length });
+  if (body.inboxId) for (const key of processed) await kvs.delete(key);
+}
+
+async function runTargetSignals(body) {
+  const prefix = `${SIGNAL_PREFIX}${body.signalTarget}:`;
+  if (!body.signalId?.startsWith(prefix)) throw permanentError('Invalid target signal.');
+  const started = Date.now(), records = await readSignals(prefix, body.signalId);
+  const policies = (await kvs.get('field-policies:v1') || []).filter(p => p.status === 'active' && p.behaviorType === 'relationship');
+  const collected = new Map();
+  for (const signal of records.values()) {
+    if (signal.targetKey !== body.signalTarget) throw permanentError('Target signal mismatch.');
+    for (const ref of signal.refs) {
+      const policy = policies.find(p => p.id === ref.policyId && p.revision === ref.revision && (p.activatedAt || '') === ref.activatedAt);
+      if (policy) await scheduleTarget(signal.targetKey, policy, ref.body, collected);
+    }
+  }
+  const token = collected.get(body.signalTarget) || (await kvs.get(pendingKey(body.signalTarget)))?.token;
+  if (token) {
+    const first = records.values().next().value;
+    await flushTarget({ flushTarget: body.signalTarget, token, jobStartedAt: started,
+      discoveryMs: first.discoveryMs, discoveryRequests: first.discoveryRequests, inboxBatchSize: first.inboxBatchSize,
+      signalBatchSize: records.size, pipeline: 'split-v2', writerQueueMs: Math.max(0, started - Math.min(...[...records.values()].map(signal => signal.handoffAt || started))) }, policies);
+  }
+  // A concurrent discovery only adds new unique keys, which this worker never
+  // deletes. Their own wake-ups guarantee a fresh follow-up calculation.
+  for (const key of records.keys()) await kvs.delete(key);
 }
 
 async function runInbox(body, workerStartedAt) {
@@ -226,7 +295,7 @@ async function scheduleTarget(key, policy, body, collector) {
     revision: policy.revision, activatedAt: policy.activatedAt || '',
     key: body.key || '', eventType: body.eventType,
     changedFields: body.changedFields || [],
-    restore: !!(policy.protect && body.key === key && body.changedFields?.includes(policy.targetFieldId)) ||
+    restore: !!body.restore || !!(policy.protect && body.key === key && body.changedFields?.includes(policy.targetFieldId)) ||
       !!(previous?.revision === policy.revision && previous?.activatedAt === (policy.activatedAt || '') && previous?.restore)
   };
   await kvs.set(storageKey, pending);
@@ -324,7 +393,9 @@ async function flushTarget(body, allPolicies) {
   }
 }
 
-export async function runRelationshipJob({ body, collector, discoveryJira, discoveryRoutes, discoveryPolicies }) {
+export async function runRelationshipJob({ body, collector, discoveryJira, discoveryRoutes, discoveryPolicies, targetSignals }) {
+  if (body.signalId) return runTargetSignals(body);
+  if (body.pipeline === 'discovery-v2' && !targetSignals) return runDiscovery(body);
   if (body.inboxId) return runInbox(body, Date.now());
   body = { ...body, jobStartedAt: Date.now() };
   const policies = discoveryPolicies || (await kvs.get('field-policies:v1') || []).filter(policy => policy.status === 'active' && policy.behaviorType === 'relationship');
@@ -357,7 +428,17 @@ export async function runRelationshipJob({ body, collector, discoveryJira, disco
         } else targets = [];
         if (target && (policy.protect || policy.skipDoneTargets)) targets.push({ key: body.key });
       }
-      for (const key of [...new Set(targets.map(item => item.key))]) await scheduleTarget(key, policy, body, collector);
+      for (const key of [...new Set(targets.map(item => item.key))]) {
+        if (!targetSignals) { await scheduleTarget(key, policy, body, collector); continue; }
+        if (!targetSignals.has(key)) targetSignals.set(key, new Map());
+        const refs = targetSignals.get(key), previous = refs.get(policy.id);
+        // One reference per policy/target, retaining earliest ingress and any
+        // protection override signal without storing source field values.
+        const restore = previous?.body.restore || !!(policy.protect && body.key === key && body.changedFields?.includes(policy.targetFieldId));
+        refs.set(policy.id, { policyId: policy.id, revision: policy.revision, activatedAt: policy.activatedAt || '',
+          body: { key: body.key, eventType: body.eventType, changedFields: body.changedFields || [], restore,
+            receivedAt: Math.min(previous?.body.receivedAt || Infinity, body.receivedAt || Date.now()) } });
+      }
       if (!targets.length) await recordRelationshipRun(policy, body, body.key, 'no-targets', started, jira.requests(), true);
     } catch (error) {
       await recordRelationshipRun(policy, body, body.key, 'error', started, jira.requests(), false, error.message);
@@ -371,6 +452,7 @@ async function recordRelationshipRun(policy, body, key, outcome, started, reques
   const record = { traceId: `fo-rel-${crypto.randomUUID()}`, policyId: policy.id, policyName: policy.name,
     workItemKey: key, sourceKey: body.key, outcome, kind: 'runtime', revision: policy.revision,
     ...(body.inboxBatchSize ? { inboxBatchSize: body.inboxBatchSize, discoveryMs: body.discoveryMs, discoveryRequests: body.discoveryRequests } : {}),
+    ...(body.signalBatchSize ? { signalBatchSize: body.signalBatchSize, pipeline: body.pipeline, writerQueueMs: body.writerQueueMs } : {}),
     ...(body.batchId ? { batchId: body.batchId, batchPolicyCount: body.batchPolicyCount, mergedSignals: body.mergedSignals, requestCountScope: 'shared-target-batch' } : {}),
     changedFieldIds: body.changedFields || [], message: String(message).slice(0, 200), eventType: body.eventType, createdAt: new Date().toISOString(), durationMs: Date.now() - started, jiraRequests: requests,
     ...(Number.isFinite(body.receivedAt) ? { sinceIngressMs: Date.now() - body.receivedAt, beforeJobMs: Math.max(0, body.jobStartedAt - body.receivedAt) } : {}) };
